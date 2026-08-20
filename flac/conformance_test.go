@@ -3,7 +3,9 @@
 package flac
 
 import (
+	"bytes"
 	"encoding/binary"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -278,5 +280,168 @@ func TestConformanceOggMappingHeader(t *testing.T) {
 				t.Errorf("stream info from the mapping header is invalid: %v", err)
 			}
 		})
+	}
+}
+
+// TestConformanceEncodeAcceptedByFFmpeg is the encoder's external gate.
+//
+// Our own decoder round-tripping proves the two agree; it cannot prove either matches the format.
+// ffmpeg decoding our output to the exact input samples does.
+func TestConformanceEncodeAcceptedByFFmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	cases := []struct {
+		name     string
+		channels int
+		depth    int
+		rate     int
+		gen      func(i, ch int) int32
+	}{
+		{"silence", 1, 16, 44100, func(int, int) int32 { return 0 }},
+		{"sine mono", 1, 16, 44100, func(i, _ int) int32 {
+			return int32(20000 * math.Sin(float64(i)*0.02))
+		}},
+		{"sine stereo", 2, 16, 48000, func(i, ch int) int32 {
+			return int32(18000 * math.Sin(float64(i)*0.01+float64(ch)*1.7))
+		}},
+		{"correlated stereo", 2, 16, 44100, func(i, ch int) int32 {
+			v := int32(15000 * math.Sin(float64(i)*0.005))
+			return v + int32(ch)
+		}},
+		{"deep", 2, 24, 96000, func(i, ch int) int32 {
+			return int32(4000000 * math.Sin(float64(i)*0.003+float64(ch)))
+		}},
+		{"incompressible", 2, 16, 44100, func(i, ch int) int32 {
+			x := uint32(i*2654435761 + ch*40503)
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			return int32(int16(x))
+		}},
+		{"wasted bits", 1, 16, 44100, func(i, _ int) int32 { return int32(i%512) << 5 }},
+		{"five channels", 5, 16, 44100, func(i, ch int) int32 {
+			return int32((i*(ch+3))%9000 - 4500)
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			const n = 30000
+			samples := make([][]int32, c.channels)
+			for ch := range samples {
+				samples[ch] = make([]int32, n)
+				for i := range n {
+					samples[ch][i] = c.gen(i, ch)
+				}
+			}
+
+			var buf seekableBuffer
+			info := StreamInfo{SampleRate: c.rate, Channels: c.channels, BitsPerSample: c.depth}
+			enc, err := NewEncoder(&buf, info, EncoderOptions{})
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.Write(samples); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := enc.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			path := filepath.Join(t.TempDir(), "ours.flac")
+			if err := os.WriteFile(path, buf.data, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			// ffmpeg verifies the MD5 in the stream info block against the samples it decodes, so a
+			// clean run also confirms the checksum we wrote.
+			out, err := exec.Command("ffmpeg", "-v", "error", "-i", path, "-f", "null", "-").CombinedOutput()
+			if err != nil {
+				t.Fatalf("ffmpeg rejected our stream: %v\n%s", err, out)
+			}
+			if len(bytes.TrimSpace(out)) != 0 {
+				t.Errorf("ffmpeg reported: %s", out)
+			}
+
+			want := referencePCM(t, path, c.channels, c.depth)
+			if len(want) != c.channels || len(want[0]) != n {
+				t.Fatalf("ffmpeg decoded %d channels of %d frames, want %d of %d",
+					len(want), len(want[0]), c.channels, n)
+			}
+			for ch := range samples {
+				for i := range n {
+					if want[ch][i] != samples[ch][i] {
+						t.Fatalf("channel %d sample %d: ffmpeg decoded %d, we encoded %d",
+							ch, i, want[ch][i], samples[ch][i])
+					}
+				}
+			}
+			t.Logf("%d bytes for %d raw (%.1f%%)",
+				len(buf.data), n*c.channels*(c.depth/8),
+				100*float64(len(buf.data))/float64(n*c.channels*(c.depth/8)))
+		})
+	}
+}
+
+// TestConformanceCompressionRatio guards the encoder's efficiency against regression.
+//
+// A round trip proves correctness and says nothing about size: an encoder that emitted verbatim
+// subframes throughout would pass every other test here. The comparison is against ffmpeg's own
+// output for the same audio, aggregated so one awkward signal cannot swing the result.
+func TestConformanceCompressionRatio(t *testing.T) {
+	var ourTotal, theirTotal, rawTotal int64
+
+	for _, path := range corpus(t, "*hz_*ch.flac") {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		samples, info, err := DecodeAll(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("DecodeAll: %v", err)
+		}
+
+		var buf seekableBuffer
+		enc, err := NewEncoder(&buf, StreamInfo{
+			SampleRate:    info.SampleRate,
+			Channels:      info.Channels,
+			BitsPerSample: info.BitsPerSample,
+		}, EncoderOptions{})
+		if err != nil {
+			t.Fatalf("NewEncoder: %v", err)
+		}
+		if err := enc.Write(samples); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := enc.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		ourTotal += int64(len(buf.data))
+		theirTotal += st.Size()
+		rawTotal += int64(len(samples[0]) * info.Channels * ((info.BitsPerSample + 7) / 8))
+	}
+
+	if rawTotal == 0 {
+		t.Skip("no corpus")
+	}
+	vsRaw := float64(ourTotal) / float64(rawTotal)
+	vsFFmpeg := float64(ourTotal) / float64(theirTotal)
+	t.Logf("ours %d bytes, ffmpeg %d, raw %d; %.3f of raw, %.3f of ffmpeg",
+		ourTotal, theirTotal, rawTotal, vsRaw, vsFFmpeg)
+
+	if vsRaw > 0.60 {
+		t.Errorf("compressed to %.1f%% of raw, want under 60%%", 100*vsRaw)
+	}
+	// The encoder uses fixed predictors only, so some headroom against ffmpeg's LPC is expected.
+	if vsFFmpeg > 1.15 {
+		t.Errorf("output is %.2fx ffmpeg's size, want at most 1.15x", vsFFmpeg)
 	}
 }

@@ -191,35 +191,40 @@ func undecorrelate(ch [][]int32, n, mode int) {
 
 // readFrameBytes reads one complete frame by scanning for the next sync code.
 //
-// A frame carries no length, so its end is found by locating the following frame's sync code. The
-// frame checksum then confirms the split, which is what makes a sync pattern occurring inside
-// residual data recoverable rather than fatal.
+// A native FLAC frame carries no length, so its end is found by locating the following frame's sync
+// code. Residual data contains byte pairs that look like sync codes routinely, so a candidate split
+// is accepted only when both the frame checksum of everything before it holds *and* a frame header
+// with a valid checksum starts at it. Requiring both turns a one-in-65536 coincidence into roughly
+// one in sixteen million.
+//
+// This ambiguity is inherent to native framing and is the reason the Ogg mapping exists; the Ogg
+// path delimits packets and never guesses.
 func (d *Decoder) readFrameBytes() ([]byte, error) {
-	// Peek far enough to find the next sync code after this frame.
 	const window = 1 << 16
 
 	buf, err := d.br.Peek(window)
 	if len(buf) < 2 {
-		if err != nil {
-			return nil, io.EOF
-		}
 		return nil, io.EOF
 	}
-	if buf[0] != 0xFF || buf[1]&0xFC != 0xF8 {
+	if !isFrameSync(buf) {
 		return nil, fmt.Errorf("%w: no frame sync at the cursor", ErrBadFrame)
 	}
 
 	for end := 2; end+1 < len(buf); end++ {
-		if buf[end] != 0xFF || buf[end+1]&0xFC != 0xF8 {
+		if !isFrameSync(buf[end:]) {
 			continue
 		}
-		if d.frameChecksumHolds(buf[:end]) {
-			d.raw = append(d.raw[:0], buf[:end]...)
-			if _, err := d.br.Discard(end); err != nil {
-				return nil, err
-			}
-			return d.raw, nil
+		if !d.frameChecksumHolds(buf[:end]) {
+			continue
 		}
+		if !d.frameHeaderValidAt(buf[end:]) {
+			continue
+		}
+		d.raw = append(d.raw[:0], buf[:end]...)
+		if _, err := d.br.Discard(end); err != nil {
+			return nil, err
+		}
+		return d.raw, nil
 	}
 
 	// No later sync code held up, so this is the final frame and runs to the end of the stream.
@@ -232,6 +237,20 @@ func (d *Decoder) readFrameBytes() ([]byte, error) {
 	}
 	d.done = true
 	return d.raw, nil
+}
+
+// isFrameSync reports whether p opens with the 15-bit frame sync and a blocking strategy bit.
+//
+// The second byte is 0xF8 or 0xF9, so the mask keeps every bit but the blocking bit. Masking one bit
+// too many would also accept 0xFA and 0xFB, widening the false-positive window for no reason.
+func isFrameSync(p []byte) bool {
+	return len(p) >= 2 && p[0] == 0xFF && p[1]&0xFE == 0xF8
+}
+
+// frameHeaderValidAt reports whether a frame header with a correct checksum begins at p.
+func (d *Decoder) frameHeaderValidAt(p []byte) bool {
+	_, err := readFrameHeader(bitio.NewMSBReader(p), d.meta.StreamInfo, p)
+	return err == nil
 }
 
 // frameChecksumHolds reports whether p ends on a valid frame checksum.
