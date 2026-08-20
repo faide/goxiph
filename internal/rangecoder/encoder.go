@@ -98,6 +98,19 @@ func (e *Encoder) Encode(fl, fh, ft uint32) {
 	e.normalize()
 }
 
+// EncodeBin is Encode for a context whose total frequency is a power of two.
+func (e *Encoder) EncodeBin(fl, fh uint32, ftb uint) {
+	r := e.rng >> ftb
+	ft := uint32(1) << ftb
+	if fl > 0 {
+		e.val += e.rng - r*(ft-fl)
+		e.rng = r * (fh - fl)
+	} else {
+		e.rng -= r * (ft - fh)
+	}
+	e.normalize()
+}
+
 // EncodeSymbol writes symbol k from a context given as cumulative frequencies.
 func (e *Encoder) EncodeSymbol(k int, cdf []uint32) {
 	e.Encode(cdf[k], cdf[k+1], cdf[len(cdf)-1])

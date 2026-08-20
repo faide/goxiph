@@ -4,6 +4,17 @@ Copyright (c) 2026, the goxiph authors.
 This product includes software developed by third parties, listed below with
 the portions of goxiph derived from them.
 
-Nothing is currently derived from third-party source. Every entry added here
-must name the upstream file, its license, and the goxiph file that adapts it.
-See AGENT/licensing.md for the policy.
+--------------------------------------------------------------------------
+
+internal/celt/laplace.go adapts the Laplace entropy coder from celt/laplace.c
+of the reference implementation published in RFC 6716.
+
+  Copyright 1994-2011 IETF Trust, Xiph.Org, Skype Limited, Octasic,
+                      Jean-Marc Valin, Timothy B. Terriberry,
+                      CSIRO, Gregory Maxwell, Mark Borgerding,
+                      Erik de Castro Lopo. All rights reserved.
+
+  Licensed under the BSD 3-Clause License. See RFC 6716 for the full text.
+
+RFC 6716 names this coder and describes its role but does not state the
+procedure, so the reference implementation is its only normative statement.

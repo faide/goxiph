@@ -110,6 +110,20 @@ func (d *Decoder) Decode(ft uint32) uint32 {
 	return 0
 }
 
+// DecodeBin is Decode for a context whose total frequency is a power of two.
+//
+// It is equivalent to Decode(1<<ftb) and avoids one division, which matters because CELT calls it
+// for every Laplace-coded value.
+func (d *Decoder) DecodeBin(ftb uint) uint32 {
+	d.ext = d.rng >> ftb
+	s := d.val / d.ext
+	ft := uint32(1) << ftb
+	if s+1 < ft {
+		return ft - (s + 1)
+	}
+	return 0
+}
+
 // Update advances the decoder past a symbol whose frequencies are fl, fh out of ft.
 func (d *Decoder) Update(fl, fh, ft uint32) {
 	s := d.ext * (ft - fh)

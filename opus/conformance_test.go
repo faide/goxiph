@@ -288,3 +288,102 @@ func TestConformanceModesAreExercised(t *testing.T) {
 		t.Fatal("no packets parsed")
 	}
 }
+
+// rangeRecord is one line of an opusdec --save-range dump.
+type rangeRecord struct {
+	samples    int
+	mode       string // LP, HYB or MDCT
+	bandwidth  string
+	stereo     bool
+	frameSize  int
+	finalRange uint32
+}
+
+var rangeLineRe = regexp.MustCompile(
+	`^(\d+),\s*(\d+),\s*\[\[[^\]]*\],\s*(\w+),\s*(\w+),\s*(\w),\s*(\d+),\s*(\d+)\]`)
+
+// readRangeDump runs opusdec with --save-range and parses what it wrote.
+//
+// The dump records, for every packet, the mode and bandwidth libopus chose, the samples it produced,
+// and the range coder's final state. It is the reference decoder describing its own work.
+func readRangeDump(t *testing.T, path string) []rangeRecord {
+	t.Helper()
+
+	dump := filepath.Join(t.TempDir(), "range.txt")
+	out := filepath.Join(t.TempDir(), "out.wav")
+	if msg, err := exec.Command("opusdec", "--quiet", "--save-range", dump, path, out).CombinedOutput(); err != nil {
+		t.Fatalf("opusdec: %v\n%s", err, msg)
+	}
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("read range dump: %v", err)
+	}
+
+	var recs []rangeRecord
+	for _, line := range strings.Split(string(raw), "\n") {
+		m := rangeLineRe.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		samples, _ := strconv.Atoi(m[1])
+		frameSize, _ := strconv.Atoi(m[6])
+		fr, _ := strconv.ParseUint(m[7], 10, 32)
+		recs = append(recs, rangeRecord{
+			samples:    samples,
+			mode:       m[3],
+			bandwidth:  m[4],
+			stereo:     m[5] == "S",
+			frameSize:  frameSize,
+			finalRange: uint32(fr),
+		})
+	}
+	return recs
+}
+
+// TestConformanceTOCMatchesReferenceDecoder checks every packet's configuration against what the
+// reference decoder read from the same bytes.
+//
+// This is stronger than comparing a total: a mode, bandwidth, channel count and sample count are
+// checked for each packet in turn, so a configuration decoded wrongly is caught at the packet where
+// it happens rather than averaged away.
+func TestConformanceTOCMatchesReferenceDecoder(t *testing.T) {
+	if _, err := exec.LookPath("opusdec"); err != nil {
+		t.Skip("opusdec not installed")
+	}
+
+	modeNames := map[Mode]string{ModeSILK: "LP", ModeHybrid: "HYB", ModeCELT: "MDCT"}
+
+	for _, path := range corpus(t, "*.opus") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			s := readStream(t, path)
+			recs := readRangeDump(t, path)
+
+			if len(recs) != len(s.packets) {
+				t.Fatalf("opusdec reported %d packets, we parsed %d", len(recs), len(s.packets))
+			}
+
+			for i, r := range recs {
+				p := s.packets[i]
+				if got := modeNames[p.Mode]; got != r.mode {
+					t.Fatalf("packet %d: we read mode %s, opusdec reports %s", i, got, r.mode)
+				}
+				if got := p.Bandwidth.String(); got != r.bandwidth {
+					t.Fatalf("packet %d: we read bandwidth %s, opusdec reports %s", i, got, r.bandwidth)
+				}
+				if p.Stereo != r.stereo {
+					t.Fatalf("packet %d: we read stereo=%v, opusdec reports %v", i, p.Stereo, r.stereo)
+				}
+				if got := p.Samples(); got != r.samples {
+					t.Fatalf("packet %d: we compute %d samples, opusdec produced %d", i, got, r.samples)
+				}
+				// The per-frame size is the packet's samples divided by its frame count.
+				if got := p.Samples() / len(p.Frames); got != r.frameSize {
+					t.Fatalf("packet %d: we compute a frame size of %d, opusdec reports %d",
+						i, got, r.frameSize)
+				}
+			}
+			t.Logf("%d packets agree on mode, bandwidth, channels and frame size", len(recs))
+		})
+	}
+}
