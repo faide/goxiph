@@ -12,13 +12,19 @@ import (
 const firstPage = "4f6767530002000000000000000005f1204b000000003e559b24011e" +
 	"01766f72626973000000000244ac00000000000080b5010000000000b801"
 
-func decodePage(t *testing.T, s string) []byte {
-	t.Helper()
+// mustHex decodes a fixture. It panics rather than taking a *testing.T so that fuzz seed corpora,
+// which are built outside a running test, can use it too.
+func mustHex(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
-		t.Fatalf("bad fixture: %v", err)
+		panic("bad fixture: " + err.Error())
 	}
 	return b
+}
+
+func decodePage(t *testing.T, s string) []byte {
+	t.Helper()
+	return mustHex(s)
 }
 
 // TestCRCAgainstReferencePage is the gate for the whole container: a wrong CRC invalidates every

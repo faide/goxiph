@@ -1,0 +1,15 @@
+# Emphasis adverbs banned in comments, docs and commit messages.
+# One word per line; blank lines and # comments ignored.
+deliberately
+intentionally
+explicitly
+importantly
+notably
+obviously
+clearly
+essentially
+basically
+simply
+actually
+certainly
+naturally

@@ -1,4 +1,4 @@
-# goxiph toolchain and tasks. See AGENT/content.md.
+# goxiph toolchain and tasks.
 
 [tools]
 go = "1.26"
@@ -9,7 +9,7 @@ gotestsum = "latest"
 # and we only shell out to them in conformance tests. `mise run doctor` checks for them.
 
 [env]
-CGO_ENABLED = "0"  # ADR 0003
+CGO_ENABLED = "0"  # goxiph is pure Go; cgo-check enforces it
 GOFLAGS = "-mod=readonly"
 
 [settings]
@@ -27,15 +27,44 @@ run = "gotestsum --format pkgname -- ./..."
 
 [tasks.race]
 description = "Tests under the race detector"
-# The race runtime needs cgo. Test-time only, so ADR 0003 is unaffected; cgo-check enforces it.
+# The race runtime needs cgo. Test-time only; the library itself stays cgo-free.
 env = { CGO_ENABLED = "1" }
 run = "go test -race ./..."
 
+[tasks.prose-check]
+description = "Ban the emphasis adverbs listed in .banned-words"
+run = '''
+words=$(grep -vE '^\s*(#|$)' .banned-words | paste -sd'|')
+hits=$(grep -rniE "\\b(${words})\\b" \
+  --include='*.go' --include='*.toml' --include='*.yml' --include='*.md' \
+  --exclude-dir=.git --exclude-dir=.specs \
+  --exclude='conventions.md' --exclude='content.md' . || true)
+if [ -n "$hits" ]; then
+  echo "emphasis adverbs found; cut the adverb and add the fact:"
+  echo "$hits"
+  exit 1
+fi
+'''
+
+[tasks.codes-check]
+description = "Milestone and ADR codes may appear only in the plan docs that define them"
+run = """
+hits=$(grep -rnE '\\b(M[0-9][a-z]?)\\b|\\bADR ?[0-9]' \
+  --include='*.go' --include='*.toml' --include='*.yml' --include='*.md' \
+  --exclude-dir=.git --exclude-dir=.specs --exclude-dir=decisions \
+  --exclude='roadmap.md' --exclude='status.md' --exclude='conventions.md' --exclude='content.md' . || true)
+if [ -n "$hits" ]; then
+  echo "internal codes leaked outside the plan; name the thing, not its code:"
+  echo "$hits"
+  exit 1
+fi
+"""
+
 [tasks.cgo-check]
-description = "Enforce ADR 0003 — no package may import C"
+description = "No package may import C; goxiph is pure Go"
 run = '''
 hits=$(grep -rn --include='*.go' -E '^\s*import\s+"C"|^\s*"C"$' . || true)
-[ -z "$hits" ] || { echo "cgo import found, see ADR 0003:"; echo "$hits"; exit 1; }
+[ -z "$hits" ] || { echo "cgo import found; goxiph is pure Go:"; echo "$hits"; exit 1; }
 '''
 
 [tasks.fmt]
@@ -57,7 +86,7 @@ run = "golangci-lint run ./..."
 
 [tasks.ci]
 description = "Pre-commit gate; must be green before starting new work"
-depends = ["fmt-check", "vet", "lint", "cgo-check", "test", "race"]
+depends = ["fmt-check", "vet", "lint", "cgo-check", "prose-check", "codes-check", "test", "race"]
 
 # --- conformance ---
 
@@ -80,7 +109,7 @@ fi
 '''
 
 [tasks.fixtures]
-description = "Synthesise the test corpus into testdata/generated (gitignored); see ADR 0004"
+description = "Synthesise the test corpus into testdata/generated; media is generated, never committed"
 depends = ["doctor"]
 run = "go run ./internal/testutil/gen -out testdata/generated"
 
@@ -114,14 +143,14 @@ run = 'go test -run "^$" -fuzz "^${2:?fuzz target}$" -fuzztime "${3:-60s}" "./${
 # --- specs ---
 
 [tasks."specs:fetch"]
-description = "Mirror the normative specs into AGENT/specs (untracked) for offline grep"
+description = "Mirror the normative specs into .specs/ for offline grep"
 run = '''
-mkdir -p AGENT/specs
-curl -fsSL -o AGENT/specs/rfc3533-ogg.txt      https://www.rfc-editor.org/rfc/rfc3533.txt
-curl -fsSL -o AGENT/specs/rfc6716-opus.txt     https://www.rfc-editor.org/rfc/rfc6716.txt
-curl -fsSL -o AGENT/specs/rfc7845-oggopus.txt  https://www.rfc-editor.org/rfc/rfc7845.txt
-curl -fsSL -o AGENT/specs/rfc9639-flac.txt     https://www.rfc-editor.org/rfc/rfc9639.txt
-curl -fsSL -o AGENT/specs/vorbis-i-spec.html   https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
-curl -fsSL -o AGENT/specs/v-comment.html       https://www.xiph.org/vorbis/doc/v-comment.html
-ls -la AGENT/specs
+mkdir -p .specs
+curl -fsSL -o .specs/rfc3533-ogg.txt      https://www.rfc-editor.org/rfc/rfc3533.txt
+curl -fsSL -o .specs/rfc6716-opus.txt     https://www.rfc-editor.org/rfc/rfc6716.txt
+curl -fsSL -o .specs/rfc7845-oggopus.txt  https://www.rfc-editor.org/rfc/rfc7845.txt
+curl -fsSL -o .specs/rfc9639-flac.txt     https://www.rfc-editor.org/rfc/rfc9639.txt
+curl -fsSL -o .specs/vorbis-i-spec.html   https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
+curl -fsSL -o .specs/v-comment.html       https://www.xiph.org/vorbis/doc/v-comment.html
+ls -la .specs
 '''
