@@ -148,8 +148,29 @@ func run(out, dur string) error {
 	}
 	count++
 
-	// An Opus stream, for the second Ogg mapping.
-	if err := tool("opusenc", "--quiet", "--bitrate", "64", src, filepath.Join(out, "sine1k.opus")); err != nil {
+	// Opus streams spanning the operating modes. Which mode the encoder picks was determined by
+	// measuring rather than assumed: mono speech-tuned input selects SILK below about 12 kbit/s and
+	// the hybrid above it, while music-tuned or stereo input goes to CELT at every rate. The 64
+	// kbit/s speech case switches mode partway through a stream, which nothing else here does.
+	monoSrc := filepath.Join(out, "sine1k_44100hz_1ch.wav")
+	opusVariants := []struct{ name, tuning, bitrate, framesize string }{
+		{"opus_silk_nb", "--speech", "6", "20"},
+		{"opus_silk_wb", "--speech", "10", "20"},
+		{"opus_hybrid_fb", "--speech", "16", "20"},
+		{"opus_mixed_modes", "--speech", "64", "20"},
+		{"opus_celt_short", "--music", "96", "2.5"},
+		{"opus_celt_long", "--music", "24", "60"},
+	}
+	for _, v := range opusVariants {
+		if err := tool("opusenc", "--quiet", v.tuning, "--bitrate", v.bitrate,
+			"--framesize", v.framesize, monoSrc, filepath.Join(out, v.name+".opus")); err != nil {
+			return err
+		}
+		count++
+	}
+	// A stereo stream, so the channel count is not always one.
+	if err := tool("opusenc", "--quiet", "--bitrate", "128", src,
+		filepath.Join(out, "opus_stereo.opus")); err != nil {
 		return err
 	}
 	count++
