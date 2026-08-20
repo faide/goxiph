@@ -16,7 +16,8 @@ import (
 	"github.com/faide/goxiph/ogg"
 )
 
-// decodeFile runs a whole Ogg Vorbis file through our decoder.
+// decodeFile runs a whole Ogg Vorbis file through the raw packet-level decoder, without the
+// granule-position trimming the stream decoder applies.
 func decodeFile(t *testing.T, path string) (*audio.Buffer, Info) {
 	t.Helper()
 	f, err := os.Open(path)
@@ -116,10 +117,7 @@ func referencePCM(t *testing.T, path string, channels int) [][]float32 {
 }
 
 // TestConformanceDecodeMatchesReference is the gate for the whole decoder: our PCM must match what
-// libvorbis produces.
-//
-// The comparison searches a small alignment window because our decoder emits every lapped sample
-// while libvorbis trims the stream using the granule positions, which is a separate concern.
+// libvorbis produces, sample for sample and with the same length.
 //
 // Both sides are quantised to the 16-bit grid before comparing. Vorbis is a lossy transform codec
 // and its output legitimately overshoots full scale, so oggdec's 16-bit output saturates where our
@@ -132,32 +130,45 @@ func TestConformanceDecodeMatchesReference(t *testing.T) {
 
 	for _, path := range corpus(t, "*hz_*ch.ogg") {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			got, info := decodeFile(t, path)
-			want := referencePCM(t, path, info.Channels)
-
-			if got.Frames() == 0 {
-				t.Fatal("decoder produced no samples")
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("open: %v", err)
 			}
+			got, _, err := DecodeAll(f)
+			f.Close()
+			if err != nil {
+				t.Fatalf("DecodeAll: %v", err)
+			}
+
+			want := referencePCM(t, path, got.Format.Channels)
 			if len(want) == 0 || len(want[0]) == 0 {
 				t.Skip("reference produced no samples")
 			}
 
-			bestLag, bestErr := 0, math.Inf(1)
-			for lag := -info.BlockSize1; lag <= info.BlockSize1; lag++ {
-				if e := compareAt(got, want, lag); e < bestErr {
-					bestErr, bestLag = e, lag
-				}
+			// Granule-position trimming must land the length exactly, not approximately.
+			if got.Frames() != len(want[0]) {
+				t.Fatalf("decoded %d frames, reference has %d", got.Frames(), len(want[0]))
 			}
 
 			// One LSB of the 16-bit grid, which bounds the rounding disagreement between our
 			// conversion and libvorbis's.
 			const tolerance = 1.0 / 32768
-			if bestErr > tolerance {
-				t.Errorf("best alignment lag %d gives max abs error %g, want at most one LSB (%g)\n"+
-					"ours %d frames, reference %d frames",
-					bestLag, bestErr, tolerance, got.Frames(), len(want[0]))
+
+			var worst float64
+			worstAt, worstCh := 0, 0
+			for c := range want {
+				for i := range want[c] {
+					d := math.Abs(quantize(got.Data[c][i]) - float64(want[c][i]))
+					if d > worst {
+						worst, worstAt, worstCh = d, i, c
+					}
+				}
+			}
+			if worst > tolerance {
+				t.Errorf("max abs error %g at channel %d sample %d, want at most one LSB (%g)",
+					worst, worstCh, worstAt, tolerance)
 			} else {
-				t.Logf("lag %d, max abs error %g over %d frames", bestLag, bestErr, len(want[0]))
+				t.Logf("%d frames, max abs error %g", got.Frames(), worst)
 			}
 		})
 	}
@@ -168,34 +179,4 @@ func TestConformanceDecodeMatchesReference(t *testing.T) {
 func quantize(v float32) float64 {
 	i := math.Round(float64(v) * 32768)
 	return min(max(i, -32768), 32767) / 32768
-}
-
-// compareAt returns the maximum absolute difference with ours shifted by lag.
-func compareAt(got *audio.Buffer, want [][]float32, lag int) float64 {
-	n := len(want[0])
-	// Skip the outer edges, where trimming differences dominate.
-	start := max(0, -lag) + 64
-	end := n - 64
-	if end-start < 256 {
-		return math.Inf(1)
-	}
-
-	var worst float64
-	for c := range want {
-		if c >= len(got.Data) {
-			return math.Inf(1)
-		}
-		ours := got.Data[c]
-		for i := start; i < end; i++ {
-			j := i + lag
-			if j < 0 || j >= len(ours) {
-				return math.Inf(1)
-			}
-			d := math.Abs(quantize(ours[j]) - float64(want[c][i]))
-			if d > worst {
-				worst = d
-			}
-		}
-	}
-	return worst
 }

@@ -206,3 +206,92 @@ func BenchmarkInverse(b *testing.B) {
 		})
 	}
 }
+
+// TestFastMatchesDirect is the gate on the FFT path. The direct evaluation is the definition, so
+// any disagreement is a bug in the fast route rather than a question of tolerance.
+func TestFastMatchesDirect(t *testing.T) {
+	rng := rand.New(rand.NewPCG(17, 23))
+
+	for _, n := range []int{2, 4, 8, 16, 64, 128, 512, 1024, 4096} {
+		tr, err := New(n)
+		if err != nil {
+			t.Fatalf("New(%d): %v", n, err)
+		}
+		if tr.plan == nil {
+			t.Fatalf("n=%d is a power of two but got no fast path", n)
+		}
+
+		spectrum := make([]float32, n)
+		for i := range spectrum {
+			spectrum[i] = rng.Float32()*2 - 1
+		}
+
+		fast := make([]float32, 2*n)
+		direct := make([]float32, 2*n)
+		tr.inverseFast(spectrum, fast)
+		tr.inverseDirect(spectrum, direct)
+
+		var worst float64
+		for j := range fast {
+			d := math.Abs(float64(fast[j] - direct[j]))
+			worst = math.Max(worst, d)
+		}
+		// The direct path accumulates n terms in float32, so it is the less accurate of the two;
+		// the bound scales with that rather than with the FFT.
+		limit := 1e-4 * float64(n)
+		if worst > limit {
+			t.Errorf("n=%d: fast and direct differ by %g, limit %g", n, worst, limit)
+		}
+	}
+}
+
+// TestFastImpulseIsExact checks the fast path against the closed form rather than against the other
+// implementation, so a shared misconception in both would still be caught.
+func TestFastImpulseIsExact(t *testing.T) {
+	const n = 64
+	tr, _ := New(n)
+
+	for _, k := range []int{0, 1, 7, 32, n - 1} {
+		spectrum := make([]float32, n)
+		spectrum[k] = 1
+		out := make([]float32, 2*n)
+		tr.inverseFast(spectrum, out)
+
+		for j := range out {
+			want := math.Cos(math.Pi / float64(n) * (float64(j) + 0.5 + float64(n)/2) * (float64(k) + 0.5))
+			if math.Abs(float64(out[j])-want) > 1e-5 {
+				t.Fatalf("k=%d j=%d: got %g, want %g", k, j, out[j], want)
+			}
+		}
+	}
+}
+
+func TestFFTAgainstDirectDFT(t *testing.T) {
+	const n = 32
+	p := newFFTPlan(n)
+	rng := rand.New(rand.NewPCG(5, 9))
+
+	re := make([]float64, n)
+	im := make([]float64, n)
+	origRe := make([]float64, n)
+	origIm := make([]float64, n)
+	for i := range n {
+		re[i] = rng.Float64() - 0.5
+		im[i] = rng.Float64() - 0.5
+		origRe[i], origIm[i] = re[i], im[i]
+	}
+	p.transform(re, im)
+
+	for k := range n {
+		var wr, wi float64
+		for j := range n {
+			a := -2 * math.Pi * float64(k) * float64(j) / float64(n)
+			c, s := math.Cos(a), math.Sin(a)
+			wr += origRe[j]*c - origIm[j]*s
+			wi += origRe[j]*s + origIm[j]*c
+		}
+		if math.Abs(re[k]-wr) > 1e-9 || math.Abs(im[k]-wi) > 1e-9 {
+			t.Fatalf("bin %d: got (%g,%g), want (%g,%g)", k, re[k], im[k], wr, wi)
+		}
+	}
+}
