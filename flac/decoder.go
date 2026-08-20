@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/faide/goxiph/internal/bitio"
+	"github.com/faide/goxiph/ogg"
 	"github.com/faide/goxiph/vorbiscomment"
 )
 
@@ -34,25 +35,50 @@ type Decoder struct {
 	br   *bufio.Reader
 	meta Metadata
 
+	// dem is set for FLAC-in-Ogg, where each packet is exactly one frame and no sync scanning is
+	// needed. It is nil for native FLAC.
+	dem    *ogg.Demuxer
+	serial uint32
+
 	subframes [][]int32
 	raw       []byte
 	done      bool
 }
 
-// NewDecoder reads the stream signature and metadata, leaving the reader at the first frame.
+// NewDecoder reads a FLAC stream, native or encapsulated in Ogg.
+//
+// The two are distinguished by their leading bytes, so callers do not have to know which they hold.
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	br := bufio.NewReaderSize(r, 1<<16)
-	meta, err := readMetadata(br)
-	if err != nil {
-		return nil, err
+
+	magic, err := br.Peek(4)
+	if err != nil || len(magic) < 4 {
+		return nil, fmt.Errorf("%w: reading signature: %w", ErrBadStream, err)
 	}
 
-	d := &Decoder{br: br, meta: meta}
+	switch string(magic) {
+	case oggSignature:
+		return newOggDecoder(br)
+	case Signature:
+		meta, err := readMetadata(br)
+		if err != nil {
+			return nil, err
+		}
+		return newDecoder(br, nil, meta), nil
+	default:
+		return nil, fmt.Errorf("%w: signature %q is neither %q nor %q",
+			ErrBadStream, magic, Signature, oggSignature)
+	}
+}
+
+// newDecoder allocates the per-stream buffers.
+func newDecoder(br *bufio.Reader, dem *ogg.Demuxer, meta Metadata) *Decoder {
+	d := &Decoder{br: br, dem: dem, meta: meta}
 	d.subframes = make([][]int32, meta.StreamInfo.Channels)
 	for i := range d.subframes {
 		d.subframes[i] = make([]int32, meta.StreamInfo.MaxBlockSize)
 	}
-	return d, nil
+	return d
 }
 
 // StreamInfo returns the mandatory metadata block.
@@ -69,14 +95,19 @@ func (d *Decoder) Next() (*Block, error) {
 		return nil, io.EOF
 	}
 
-	frame, err := d.readFrameBytes()
+	frame, err := d.nextFrameBytes()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			d.done = true
 		}
 		return nil, err
 	}
+	return d.decodeFrame(frame)
+}
 
+// decodeFrame turns one complete frame into samples. Native and Ogg framing differ only in how the
+// frame boundaries are found, so everything after that point is shared.
+func (d *Decoder) decodeFrame(frame []byte) (*Block, error) {
 	r := bitio.NewMSBReader(frame)
 	h, err := readFrameHeader(r, d.meta.StreamInfo, frame)
 	if err != nil {
@@ -123,6 +154,14 @@ func (d *Decoder) Next() (*Block, error) {
 		block.Samples[ch] = d.subframes[ch][:h.blockSize]
 	}
 	return block, nil
+}
+
+// nextFrameBytes returns the next complete frame, however the container delimits it.
+func (d *Decoder) nextFrameBytes() ([]byte, error) {
+	if d.dem != nil {
+		return d.nextOggFrame()
+	}
+	return d.readFrameBytes()
 }
 
 // undecorrelate restores left and right from the stored channel pair. RFC 9639 section 4.2.

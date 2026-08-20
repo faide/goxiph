@@ -86,6 +86,15 @@ func run(out, dur string) error {
 		}
 	}
 
+	// FLAC encapsulated in Ogg, which frames each audio packet instead of relying on sync scanning.
+	for _, base := range []string{"sine1k_44100hz_2ch", "noise_44100hz_1ch", "sweep_48000hz_2ch"} {
+		if err := tool("ffmpeg", "-v", "error", "-y", "-i", filepath.Join(out, base+".wav"),
+			"-c:a", "flac", "-f", "ogg", filepath.Join(out, base+".oga")); err != nil {
+			return err
+		}
+		count++
+	}
+
 	// FLAC at 24-bit and at both ends of the compression range: level 0 leans on fixed predictors
 	// and verbatim subframes, level 12 on high-order LPC.
 	src24 := filepath.Join(out, "sweep_44100hz_2ch.wav")

@@ -78,7 +78,8 @@ func TestConformanceDecodeIsBitExact(t *testing.T) {
 		t.Skip("ffmpeg not installed")
 	}
 
-	for _, path := range corpus(t, "*.flac") {
+	files := append(corpus(t, "*.flac"), corpus(t, "*.oga")...)
+	for _, path := range files {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			f, err := os.Open(path)
 			if err != nil {
@@ -182,3 +183,100 @@ func fmtSscan(s string, rate, channels *int) (int, error) {
 }
 
 func strconvErr() error { return strconv.ErrSyntax }
+
+// TestConformanceOggAndNativeAgree decodes the same audio through both framings.
+//
+// Native FLAC finds frame boundaries by scanning for sync codes; Ogg delimits every packet. The two
+// paths share everything after that point, so identical output confirms the framing rather than the
+// codec.
+func TestConformanceOggAndNativeAgree(t *testing.T) {
+	for _, oggPath := range corpus(t, "*.oga") {
+		base := filepath.Base(oggPath)
+		nativePath := filepath.Join(corpusDir, base[:len(base)-len(".oga")]+".flac")
+		if _, err := os.Stat(nativePath); err != nil {
+			t.Skipf("no native counterpart for %s", base)
+		}
+
+		t.Run(base, func(t *testing.T) {
+			of, err := os.Open(oggPath)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer of.Close()
+			fromOgg, oggInfo, err := DecodeAll(of)
+			if err != nil {
+				t.Fatalf("decoding Ogg-FLAC: %v", err)
+			}
+
+			nf, err := os.Open(nativePath)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer nf.Close()
+			fromNative, nativeInfo, err := DecodeAll(nf)
+			if err != nil {
+				t.Fatalf("decoding native FLAC: %v", err)
+			}
+
+			if oggInfo.Channels != nativeInfo.Channels ||
+				oggInfo.SampleRate != nativeInfo.SampleRate ||
+				oggInfo.BitsPerSample != nativeInfo.BitsPerSample {
+				t.Fatalf("stream info differs: ogg %+v, native %+v", oggInfo, nativeInfo)
+			}
+			if len(fromOgg) != len(fromNative) || len(fromOgg[0]) != len(fromNative[0]) {
+				t.Fatalf("ogg gave %d channels of %d frames, native gave %d of %d",
+					len(fromOgg), len(fromOgg[0]), len(fromNative), len(fromNative[0]))
+			}
+			for c := range fromOgg {
+				for i := range fromOgg[c] {
+					if fromOgg[c][i] != fromNative[c][i] {
+						t.Fatalf("channel %d sample %d: ogg %d, native %d",
+							c, i, fromOgg[c][i], fromNative[c][i])
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestConformanceOggMappingHeader checks the first packet against the shape RFC 9639 section 10.1
+// requires, including that it sits alone on a 79-byte page.
+func TestConformanceOggMappingHeader(t *testing.T) {
+	for _, path := range corpus(t, "*.oga") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if len(raw) < 79 {
+				t.Fatalf("file is %d bytes", len(raw))
+			}
+			// The specification fixes the first page at 79 bytes because the mapping header must
+			// not share a page.
+			nsegs := int(raw[26])
+			total := 27 + nsegs
+			for _, s := range raw[27 : 27+nsegs] {
+				total += int(s)
+			}
+			if total != 79 {
+				t.Errorf("first page is %d bytes, want 79", total)
+			}
+
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer f.Close()
+			d, err := NewDecoder(f)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			if d.dem == nil {
+				t.Error("an Ogg file was not recognised as Ogg-encapsulated")
+			}
+			if err := d.StreamInfo().Validate(); err != nil {
+				t.Errorf("stream info from the mapping header is invalid: %v", err)
+			}
+		})
+	}
+}
