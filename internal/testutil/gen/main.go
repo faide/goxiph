@@ -75,7 +75,56 @@ func run(out, dur string) error {
 				return err
 			}
 			count++
+
+			// A FLAC stream. ffmpeg rather than the flac tool: flac and metaflac are GPL while
+			// libFLAC is BSD, and ffmpeg is present here anyway.
+			if err := tool("ffmpeg", "-v", "error", "-y", "-i", wav,
+				"-c:a", "flac", filepath.Join(out, base+".flac")); err != nil {
+				return err
+			}
+			count++
 		}
+	}
+
+	// FLAC at 24-bit and at both ends of the compression range: level 0 leans on fixed predictors
+	// and verbatim subframes, level 12 on high-order LPC.
+	src24 := filepath.Join(out, "sweep_44100hz_2ch.wav")
+	for _, v := range []struct{ name, depth, level string }{
+		{"flac24_level5", "s32", "5"},
+		{"flac16_level0", "s16", "0"},
+		{"flac16_level12", "s16", "12"},
+	} {
+		args := []string{"-v", "error", "-y", "-i", src24, "-c:a", "flac",
+			"-compression_level", v.level, "-sample_fmt", v.depth,
+			filepath.Join(out, v.name+".flac")}
+		if err := tool("ffmpeg", args...); err != nil {
+			return err
+		}
+		count++
+	}
+
+	// Fixtures that force the subframe types ordinary audio never reaches. Verified by counting:
+	// dithered "silence" from sox compresses as LPC, so true digital silence is needed for constant
+	// subframes, and incompressible data is needed for verbatim and escaped partitions.
+	if err := writeWAV(filepath.Join(out, "truesilence.wav"), 44100, 2, func(int, int) int16 { return 0 }); err != nil {
+		return err
+	}
+	rng := uint32(12345)
+	if err := writeWAV(filepath.Join(out, "incompressible.wav"), 44100, 2, func(int, int) int16 {
+		// xorshift: uniform bits are what defeats every predictor the format has.
+		rng ^= rng << 13
+		rng ^= rng >> 17
+		rng ^= rng << 5
+		return int16(rng)
+	}); err != nil {
+		return err
+	}
+	for _, n := range []string{"truesilence", "incompressible"} {
+		if err := tool("ffmpeg", "-v", "error", "-y", "-i", filepath.Join(out, n+".wav"),
+			"-c:a", "flac", filepath.Join(out, n+".flac")); err != nil {
+			return err
+		}
+		count += 2
 	}
 
 	// A packet larger than one page needs a long comment; oggenc carries arbitrary tag text.
@@ -106,6 +155,36 @@ func run(out, dur string) error {
 
 	fmt.Printf("gen: wrote %d files to %s\n", count, out)
 	return nil
+}
+
+// writeWAV emits a 16-bit WAV of one second, sourcing each sample from gen.
+func writeWAV(path string, rate, channels int, gen func(frame, ch int) int16) error {
+	frames := rate
+	data := make([]byte, 0, frames*channels*2)
+	for i := range frames {
+		for c := range channels {
+			v := uint16(gen(i, c))
+			data = append(data, byte(v), byte(v>>8))
+		}
+	}
+
+	var h []byte
+	le32 := func(v uint32) { h = append(h, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
+	le16 := func(v uint16) { h = append(h, byte(v), byte(v>>8)) }
+	h = append(h, "RIFF"...)
+	le32(uint32(36 + len(data)))
+	h = append(h, "WAVEfmt "...)
+	le32(16)
+	le16(1) // PCM
+	le16(uint16(channels))
+	le32(uint32(rate))
+	le32(uint32(rate * channels * 2))
+	le16(uint16(channels * 2))
+	le16(16)
+	h = append(h, "data"...)
+	le32(uint32(len(data)))
+
+	return os.WriteFile(path, append(h, data...), 0o644)
 }
 
 func tool(name string, args ...string) error {
