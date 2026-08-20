@@ -421,3 +421,44 @@ func BenchmarkDecodeScalar(b *testing.B) {
 		}
 	}
 }
+
+func FuzzParseSetup(f *testing.F) {
+	f.Add([]byte{packetSetup, 'v', 'o', 'r', 'b', 'i', 's'})
+	f.Add(append([]byte{packetSetup}, "vorbis\x00"...))
+
+	info := Info{Channels: 2, SampleRate: 44100, BlockSize0: 256, BlockSize1: 2048}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		s, err := ParseSetup(data, info)
+		if err != nil {
+			return
+		}
+		// Anything that parsed must be internally consistent, since the decoder will trust it.
+		for i, m := range s.Modes {
+			if m.Mapping < 0 || m.Mapping >= len(s.Mappings) {
+				t.Fatalf("mode %d references mapping %d of %d", i, m.Mapping, len(s.Mappings))
+			}
+		}
+		for i, m := range s.Mappings {
+			for j, fl := range m.SubmapFloor {
+				if fl < 0 || fl >= len(s.Floors) {
+					t.Fatalf("mapping %d submap %d references floor %d of %d", i, j, fl, len(s.Floors))
+				}
+			}
+			for j, re := range m.SubmapResidue {
+				if re < 0 || re >= len(s.Residues) {
+					t.Fatalf("mapping %d submap %d references residue %d of %d", i, j, re, len(s.Residues))
+				}
+			}
+			for j, mux := range m.Mux {
+				if mux < 0 || mux >= len(m.SubmapFloor) {
+					t.Fatalf("mapping %d channel %d uses submap %d of %d", i, j, mux, len(m.SubmapFloor))
+				}
+			}
+		}
+		for i, res := range s.Residues {
+			if res.Classbook < 0 || res.Classbook >= len(s.Codebooks) {
+				t.Fatalf("residue %d classbook %d of %d", i, res.Classbook, len(s.Codebooks))
+			}
+		}
+	})
+}

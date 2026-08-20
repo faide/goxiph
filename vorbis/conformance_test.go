@@ -284,3 +284,80 @@ func TestConformanceCodebooksFromRealStreams(t *testing.T) {
 		})
 	}
 }
+
+// TestConformanceFullSetupHeader parses the complete setup header of every reference stream.
+//
+// The framing bit at the very end is the alignment check for the whole packet: floors, residues,
+// mappings and modes all have to consume exactly the right number of bits for it to land.
+func TestConformanceFullSetupHeader(t *testing.T) {
+	floorTypes := map[int]int{}
+	residueTypes := map[int]int{}
+	coupled, submapped := 0, 0
+
+	for _, path := range corpus(t, "*hz_*ch.ogg") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			packets := headerPackets(t, path, 3)
+			if len(packets) < 3 {
+				t.Fatalf("got %d packets, want 3", len(packets))
+			}
+			info, err := ParseInfo(packets[0])
+			if err != nil {
+				t.Fatalf("ParseInfo: %v", err)
+			}
+			s, err := ParseSetup(packets[2], info)
+			if err != nil {
+				t.Fatalf("ParseSetup: %v", err)
+			}
+
+			if len(s.Modes) == 0 || len(s.Mappings) == 0 || len(s.Floors) == 0 || len(s.Residues) == 0 {
+				t.Fatal("setup is missing a required section")
+			}
+			for i, f := range s.Floors {
+				floorTypes[f.Type]++
+				if f.Type == 1 && f.One.Values() < 2 {
+					t.Errorf("floor %d has %d X values", i, f.One.Values())
+				}
+			}
+			for _, res := range s.Residues {
+				residueTypes[res.Type]++
+			}
+			for _, m := range s.Mappings {
+				if len(m.CouplingSteps) > 0 {
+					coupled++
+				}
+				if len(m.SubmapFloor) > 1 {
+					submapped++
+				}
+				for _, ch := range m.Mux {
+					if ch >= len(m.SubmapFloor) {
+						t.Errorf("channel maps to submap %d of %d", ch, len(m.SubmapFloor))
+					}
+				}
+			}
+			// Both block sizes must be reachable whenever they differ. At low sample rates
+			// libvorbis sets them equal (512/512 at 8 kHz) and emits a single mode, so requiring
+			// two would be wrong.
+			short, long := false, false
+			for _, m := range s.Modes {
+				if m.BlockFlag {
+					long = true
+				} else {
+					short = true
+				}
+			}
+			if info.BlockSize0 != info.BlockSize1 && (!short || !long) {
+				t.Errorf("blocksizes %d/%d but modes cover short=%v long=%v",
+					info.BlockSize0, info.BlockSize1, short, long)
+			}
+			if !short && !long {
+				t.Error("no modes at all")
+			}
+		})
+	}
+
+	t.Logf("floor types %v, residue types %v, %d coupled mappings, %d multi-submap mappings",
+		floorTypes, residueTypes, coupled, submapped)
+	if floorTypes[1] == 0 {
+		t.Error("no floor 1 encountered")
+	}
+}
