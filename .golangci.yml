@@ -1,0 +1,38 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - misspell
+    - unconvert
+    - predeclared
+    - errorlint
+    - gocritic
+    - revive
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+    gocritic:
+      disabled-checks:
+        # Fires on the bit-manipulation idioms every codec in here is made of.
+        - appendAssign
+        - commentFormatting
+
+  exclusions:
+    rules:
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt

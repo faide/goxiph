@@ -1,0 +1,11 @@
+# Generated test corpus; see ADR 0004.
+/testdata/generated/
+
+# Build output.
+/bin/
+/dist/
+*.test
+*.out
+
+# Local tool state.
+.mise.local.toml
