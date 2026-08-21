@@ -24,6 +24,10 @@ in RFC 6716:
 
   pulsecache.go  the pseudo-pulse scale, the fixed-point logarithm and the
               pulse cost cache, from celt/rate.c, celt/rate.h and celt/cwrs.c
+  bands.go    the band splitting recursion, the split angle distributions,
+              the stereo merge and the band loop, from celt/bands.c
+  tf.go       the time-frequency resolution decoding and its selection
+              table, from celt/celt.c
 
   internal/celt/testdata/gen_bitexact.c reproduces four of those functions
   from the same source, to generate the vectors they are checked against.
