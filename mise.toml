@@ -108,6 +108,19 @@ if [ "$missing" -ne 0 ]; then
 fi
 '''
 
+[tasks."fixtures:vectors"]
+description = "Fetch the official Opus test vectors named by RFC 8251"
+run = '''
+mkdir -p testdata/vectors
+curl -fsSL --max-time 300 -o testdata/vectors/newvectors.tar.gz https://www.ietf.org/proceedings/98/slides/materials-98-codec-opus-newvectors-00.tar.gz
+tar xzf testdata/vectors/newvectors.tar.gz -C testdata/vectors --strip-components=1
+
+# RFC 8251 section 11 states a SHA-1 for every file. Checking them is what makes these the official
+# vectors rather than merely some vectors.
+sed -n '/hashes of the test vectors/,/^12\./p' .specs/rfc8251-opus-update.txt | grep -oE '[0-9a-f]{40}  [^ ]+' > testdata/vectors/rfc8251.sha1
+cd testdata/vectors && sha1sum -c rfc8251.sha1 | tail -2
+'''
+
 [tasks."fixtures:forced"]
 description = "Build the fixtures opusenc cannot produce, using the reference encoder"
 run = "go run ./internal/testutil/refenc -out testdata/generated"
@@ -154,21 +167,26 @@ run = 'go test -run "^$" -fuzz "^${2:?fuzz target}$" -fuzztime "${3:-60s}" "./${
 description = "Mirror the normative specs into .specs/ for offline grep"
 run = '''
 mkdir -p .specs
-curl -fsSL -o .specs/rfc3533-ogg.txt      https://www.rfc-editor.org/rfc/rfc3533.txt
-curl -fsSL -o .specs/rfc6716-opus.txt     https://www.rfc-editor.org/rfc/rfc6716.txt
-curl -fsSL -o .specs/rfc7845-oggopus.txt  https://www.rfc-editor.org/rfc/rfc7845.txt
-# RFC 6716 and 7845 are each amended by a later RFC. Both are normative; neither is optional.
-curl -fsSL -o .specs/rfc8251-opus-update.txt   https://www.rfc-editor.org/rfc/rfc8251.txt
-curl -fsSL -o .specs/rfc8486-opus-ambisonics.txt https://www.rfc-editor.org/rfc/rfc8486.txt
-curl -fsSL -o .specs/rfc9639-flac.txt     https://www.rfc-editor.org/rfc/rfc9639.txt
-curl -fsSL -o .specs/vorbis-i-spec.html   https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
-curl -fsSL -o .specs/v-comment.html       https://www.xiph.org/vorbis/doc/v-comment.html
+curl -fsSL -o .specs/rfc3533-ogg.txt        https://www.rfc-editor.org/rfc/rfc3533.txt
+curl -fsSL -o .specs/rfc6716-opus.txt       https://www.rfc-editor.org/rfc/rfc6716.txt
+curl -fsSL -o .specs/rfc7845-oggopus.txt    https://www.rfc-editor.org/rfc/rfc7845.txt
+curl -fsSL -o .specs/rfc9639-flac.txt       https://www.rfc-editor.org/rfc/rfc9639.txt
+curl -fsSL -o .specs/vorbis-i-spec.html     https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
+curl -fsSL -o .specs/v-comment.html         https://www.xiph.org/vorbis/doc/v-comment.html
+
+# Both Opus documents are amended, and the amendments are normative. 8251 corrects the decoder that
+# 6716 embeds; 8486 adds channel mapping families to 7845. Reading either base document alone gives
+# a decoder that is wrong in hybrid mode.
+curl -fsSL -o .specs/rfc8251-opus-update.txt      https://www.rfc-editor.org/rfc/rfc8251.txt
+curl -fsSL -o .specs/rfc8486-opus-ambisonics.txt  https://www.rfc-editor.org/rfc/rfc8486.txt
 
 # RFC 6716 embeds its reference implementation as base64 and states the archive's SHA1. Opus tables
 # the prose never prints are checked against it, so extracting it keeps those checks runnable.
+#
+# It is the 2012 implementation, from before RFC 8251 corrected it. Take tables and procedures from
+# it; do not take its behaviour, which differs from the amended text in hybrid folding, in two
+# saturation cases and in the band energy cap.
 grep '^   ###' .specs/rfc6716-opus.txt | sed -e 's/...###//' | base64 --decode > .specs/opus-rfc6716.tar.gz
 echo "86a927223e73d2476646a1b933fcd3fffb6ecc8c  .specs/opus-rfc6716.tar.gz" | sha1sum -c -
 tar xzf .specs/opus-rfc6716.tar.gz -C .specs
-
-ls -la .specs
 '''

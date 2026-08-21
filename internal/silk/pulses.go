@@ -22,8 +22,6 @@ const (
 
 // DecodePulses reads a frame's excitation.
 func DecodePulses(d *rangecoder.Decoder, signalType, quantOffsetType, frameLength int) []int {
-	pulses := make([]int, frameLength)
-
 	// The rate level selects how the pulse counts are distributed. Voiced and unvoiced frames have
 	// different shapes, so the choice is itself coded from a distribution that depends on which.
 	level := d.DecodeICDF(rateLevelICDF[signalType>>1][:], 8)
@@ -34,6 +32,10 @@ func DecodePulses(d *rangecoder.Decoder, signalType, quantOffsetType, frameLengt
 		// blocks; the last one is coded in full and its tail discarded.
 		blocks++
 	}
+
+	// Room for every block, not merely for the frame. The last block of a 120-sample frame runs
+	// eight samples past its end, and those samples are still coded and still have to go somewhere.
+	pulses := make([]int, blocks*shellBlockLength)
 
 	sums := make([]int, blocks)
 	shifts := make([]int, blocks)
@@ -78,7 +80,7 @@ func DecodePulses(d *rangecoder.Decoder, signalType, quantOffsetType, frameLengt
 	}
 
 	decodeSigns(d, pulses, frameLength, signalType, quantOffsetType, sums)
-	return pulses
+	return pulses[:frameLength]
 }
 
 // decodeShellBlock splits a block's pulse total down to individual samples.

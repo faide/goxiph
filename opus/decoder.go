@@ -76,7 +76,16 @@ type Decoder struct {
 	// codec was not running, because it has missed however long the other was in charge.
 	prevMode Mode
 	hasPrev  bool
+
+	// finalRange is the entropy coder's state after the last frame decoded. It is a running
+	// function of every symbol read, so two decoders agree on it only if they read the same
+	// symbols in the same order. RFC 6716 section 5.1 names it as the way to find a fault in
+	// either side.
+	finalRange uint32
 }
+
+// FinalRange returns the entropy coder state after the most recent frame.
+func (d *Decoder) FinalRange() uint32 { return d.finalRange }
 
 // NewDecoder returns a decoder producing the given channel count at 48 kHz.
 func NewDecoder(channels int) (*Decoder, error) {
@@ -124,7 +133,9 @@ func (d *Decoder) Decode(packet []byte) ([][]float32, error) {
 // decodeFrame decodes one frame of a packet with whichever codec its configuration names.
 func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]float32, error) {
 	if len(frame) <= 1 {
-		// An empty frame is silence, and neither codec is run for it.
+		// An empty frame is silence, and neither codec is run for it. The reference reports no
+		// range for such a packet, so neither does this.
+		d.finalRange = 0
 		out := make([][]float32, coded)
 		for c := range out {
 			out[c] = make([]float32, samples)
@@ -146,7 +157,10 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 
 	switch p.Mode {
 	case ModeCELT:
-		return d.decodeCELT(p, rangecoder.NewDecoder(frame), len(frame), samples, coded, 0)
+		dec := rangecoder.NewDecoder(frame)
+		out, err := d.decodeCELT(p, dec, len(frame), samples, coded, 0)
+		d.finalRange = dec.Range()
+		return out, err
 	case ModeSILK:
 		dec := rangecoder.NewDecoder(frame)
 		out, err := d.decodeSILK(p, dec, samples, coded, silkRateFor(p.Bandwidth))
@@ -156,6 +170,7 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		// A SILK-only packet can carry a redundant transform frame too, and its bytes are not
 		// SILK's. Nothing reads them here, but the flags have to be accounted for.
 		readRedundancy(dec, len(frame), false)
+		d.finalRange = dec.Range()
 		return out, nil
 	case ModeHybrid:
 		// One range decoder, read in turn: SILK takes the low bands and leaves the coder wherever
@@ -171,6 +186,7 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		if err != nil {
 			return nil, err
 		}
+		d.finalRange = dec.Range()
 		// The two cover different bands of the same signal, so the result is their sum.
 		for c := range high {
 			for i := range high[c] {
