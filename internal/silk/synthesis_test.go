@@ -75,7 +75,7 @@ func TestSynthesisMatchesReference(t *testing.T) {
 				taps = make([]int16, ltpOrder*subframes)
 			}
 
-			got := syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes)
+			got := syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes, 0, TypeInactive, lagPrevAfterReset)
 			if len(got) != len(want.samples) {
 				t.Fatalf("case %d frame %d: %d samples, reference has %d",
 					i, want.index, len(got), len(want.samples))
@@ -163,7 +163,7 @@ func TestResamplerMatchesReference(t *testing.T) {
 				scale = LTPScale(ix.LTPScaleIndex)
 			}
 
-			pcm := syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes)
+			pcm := syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes, 0, TypeInactive, lagPrevAfterReset)
 			got := rs.Resample(pcm)
 
 			if len(got) != len(want.resampled) {

@@ -196,6 +196,56 @@ func randStep(seed int32) int32 {
 	return 907633515 + seed*196314165
 }
 
+// sumSqrShift returns the energy of x, shifted right far enough to fit, and the shift it used.
+//
+// The running total is allowed to overflow and is caught by its sign, which is how the reference
+// finds the scale without a wider accumulator. A pair that overflows is counted once at full scale
+// and once shifted, and that double count is part of the result every other decoder produces.
+func sumSqrShift(x []int16) (energy int32, shift uint) {
+	var nrg int32
+	n := len(x) - 1
+
+	i := 0
+	for ; i < n; i += 2 {
+		nrg += int32(x[i]) * int32(x[i])
+		nrg += int32(x[i+1]) * int32(x[i+1])
+		if nrg < 0 {
+			nrg = int32(uint32(nrg) >> 2)
+			shift = 2
+			break
+		}
+	}
+	for ; i < n; i += 2 {
+		t := int32(x[i]) * int32(x[i])
+		t += int32(x[i+1]) * int32(x[i+1])
+		nrg += int32(uint32(t) >> shift)
+		if nrg < 0 {
+			nrg = int32(uint32(nrg) >> 2)
+			shift += 2
+		}
+	}
+	if i == n {
+		nrg += int32(uint32(int32(x[i])*int32(x[i])) >> shift)
+	}
+
+	// Two leading zeros in all, so that a caller can shift left by one without losing the sign.
+	if nrg&(-1<<30) != 0 {
+		nrg = int32(uint32(nrg) >> 2)
+		shift += 2
+	}
+	return nrg, shift
+}
+
+// bwExpand16 widens a filter's resonances by moving its poles towards the origin.
+func bwExpand16(ar []int16, chirpQ16 int32) {
+	minusOne := chirpQ16 - 65536
+	for i := range len(ar) - 1 {
+		ar[i] = int16(rshiftRound(chirpQ16*int32(ar[i]), 16))
+		chirpQ16 += rshiftRound(chirpQ16*minusOne, 16)
+	}
+	ar[len(ar)-1] = int16(rshiftRound(chirpQ16*int32(ar[len(ar)-1]), 16))
+}
+
 // subSat32 subtracts, clamping rather than wrapping.
 func subSat32(a, b int32) int32 {
 	d := int64(a) - int64(b)

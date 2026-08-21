@@ -26,6 +26,31 @@ type channelState struct {
 	prevGain int32
 	prevNLSF []int16
 	syn      *SynthesisState
+
+	plc plcState
+	cng cngState
+
+	// lossCount is how many frames in a row have been concealed, which sets how hard concealment
+	// attenuates. prevSignalType and lagPrev are the last good frame's, which both concealment and
+	// the frame after it extrapolate from.
+	lossCount            int
+	prevSignalType       int
+	lagPrev              int
+	firstFrameAfterReset bool
+}
+
+// lagPrevAfterReset is the pitch a channel starts from with no frame behind it, from
+// silk/decoder_set_fs.c.
+const lagPrevAfterReset = 100
+
+// newChannelState returns a channel with nothing behind it.
+func newChannelState(rateKHz, subframes int) channelState {
+	return channelState{
+		syn:                  NewSynthesisState(rateKHz, subframes),
+		lagPrev:              lagPrevAfterReset,
+		prevSignalType:       TypeInactive,
+		firstFrameAfterReset: true,
+	}
 }
 
 // NewDecoder returns a decoder for one configuration.
@@ -56,8 +81,9 @@ func (d *Decoder) SetRate(rateKHz int) {
 
 	for c := range d.config.Channels {
 		// The entropy state in d.ch[c].frames survives; everything else is rebuilt.
-		d.ch[c].syn = NewSynthesisState(rateKHz, d.config.Subframes())
-		d.ch[c].prevNLSF = nil
+		syn, frames := NewSynthesisState(rateKHz, d.config.Subframes()), d.ch[c].frames
+		d.ch[c] = newChannelState(rateKHz, d.config.Subframes())
+		d.ch[c].syn, d.ch[c].frames = syn, frames
 		// From silk/decoder_set_fs.c: the gain index restarts at ten, not at zero.
 		d.ch[c].prevGain = gainIndexAfterRateChange
 		d.resample[c] = NewResampler(rateKHz)
@@ -70,7 +96,7 @@ const gainIndexAfterRateChange = 10
 // reset clears everything that carries between frames.
 func (d *Decoder) reset() {
 	for c := range d.config.Channels {
-		d.ch[c] = channelState{syn: NewSynthesisState(d.config.SampleRateKHz, d.config.Subframes())}
+		d.ch[c] = newChannelState(d.config.SampleRateKHz, d.config.Subframes())
 		d.resample[c] = NewResampler(d.config.SampleRateKHz)
 	}
 	d.stereo = StereoState{}
@@ -82,9 +108,9 @@ func (d *Decoder) reset() {
 // The side decoder's state describes a signal that was not coded for however long the frame-only
 // stretch lasted, so carrying it forward would predict from something that is not there.
 func (d *Decoder) resetSide() {
-	d.ch[1] = channelState{syn: NewSynthesisState(d.config.SampleRateKHz, d.config.Subframes())}
-	d.ch[1].frames.prevLagIndex = 100
-	d.ch[1].prevGain = 10
+	d.ch[1] = newChannelState(d.config.SampleRateKHz, d.config.Subframes())
+	d.ch[1].frames.prevLagIndex = lagPrevAfterReset
+	d.ch[1].prevGain = gainIndexAfterRateChange
 }
 
 // Decode reads one SILK payload of the given duration and returns its samples at 48 kHz, one slice
@@ -225,6 +251,16 @@ func (d *Decoder) decodeFrame(dec *rangecoder.Decoder, channel int, mode CodingM
 	}
 	st.prevNLSF = nlsf
 
+	// The first frame after a loss widens its filter's resonances. Concealment left the long-term
+	// state describing a signal this filter was not fitted to, and a sharp filter driven by it rings.
+	// Without interpolation the two halves are the same slice, so expanding the second covers both.
+	if st.lossCount > 0 {
+		bwExpand16(p.LPCQ12[1], bweAfterLossQ16)
+		if ix.NLSFInterpolation < 4 {
+			bwExpand16(p.LPCQ12[0], bweAfterLossQ16)
+		}
+	}
+
 	lags := make([]int, subframes)
 	taps := make([]int16, ltpOrder*subframes)
 	var scale int16
@@ -234,5 +270,90 @@ func (d *Decoder) decodeFrame(dec *rangecoder.Decoder, channel int, mode CodingM
 		scale = LTPScale(ix.LTPScaleIndex)
 	}
 
-	return st.syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes)
+	out := st.syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes,
+		st.lossCount, st.prevSignalType, st.lagPrev)
+
+	st.plc.sync(st.syn, len(out))
+	st.plc.update(ix, p, lags, taps, scale, subframes, st.syn.subframeLen, cb.order,
+		d.config.SampleRateKHz)
+	st.lossCount = 0
+	st.prevSignalType = ix.SignalType
+	st.firstFrameAfterReset = false
+	st.plc.glueFrames(out, 0)
+
+	st.cng.sync(st.syn, cb.order)
+	if ix.SignalType == TypeInactive {
+		st.cng.update(nlsf, p, st.syn.exc[:], subframes, st.syn.subframeLen, cb.order)
+	}
+	st.cng.silence(cb.order)
+	st.lagPrev = lags[subframes-1]
+	return out
+}
+
+// Conceal produces one packet's worth of samples without a packet, at 48 kHz.
+//
+// The duration is the one the caller expected, and a packet longer than 20 ms is concealed one frame
+// at a time: concealment fades as the loss runs on, and a 60 ms hole should fade three frames' worth
+// rather than one.
+func (d *Decoder) Conceal(frameMS int) ([][]int16, error) {
+	d.config.FrameMS = frameMS
+	if err := d.config.Validate(); err != nil {
+		return nil, err
+	}
+
+	stereo := d.config.Channels == 2
+	length := d.config.FrameLength()
+
+	out := make([][]int16, d.config.Channels)
+	for range d.config.FramesPerPacket() {
+		// With no packet there is nothing to read the prediction from, so the last one stands.
+		pred := d.stereo.PrevPrediction()
+		if stereo && d.prevMidOnly {
+			d.resetSide()
+		}
+
+		mid := make([]int16, length+2)
+		side := make([]int16, length+2)
+		copy(mid[2:], d.concealFrame(0, length))
+		// A packet that coded no side channel leaves nothing to extrapolate from, so the side stays
+		// silent until one arrives.
+		if stereo && !d.prevMidOnly {
+			copy(side[2:], d.concealFrame(1, length))
+		}
+
+		if stereo {
+			d.stereo.MidSideToLeftRight(mid, side, pred, d.config.SampleRateKHz, length)
+		} else {
+			d.stereo.BufferMono(mid, length)
+		}
+		out[0] = append(out[0], d.resample[0].Resample(mid[1:length+1])...)
+		if stereo {
+			out[1] = append(out[1], d.resample[1].Resample(side[1:length+1])...)
+		}
+	}
+
+	// The gain is unclamped after a loss, so that a signal that was fading is not pulled back up by
+	// the limit on how far one frame's gain may move from the last.
+	for c := range d.config.Channels {
+		d.ch[c].prevGain = gainIndexAfterRateChange
+	}
+	return out, nil
+}
+
+// concealFrame extrapolates one channel's frame and folds it into that channel's history.
+func (d *Decoder) concealFrame(channel, length int) []int16 {
+	st := &d.ch[channel]
+	cb := codebookFor(d.config.SampleRateKHz)
+
+	out := make([]int16, length)
+	st.plc.sync(st.syn, length)
+	st.lagPrev = st.plc.conceal(st.syn, out, st.lossCount, st.prevSignalType, st.firstFrameAfterReset)
+	st.lossCount++
+
+	st.syn.pushOutput(out)
+	st.plc.glueFrames(out, st.lossCount)
+
+	st.cng.sync(st.syn, cb.order)
+	st.cng.generate(out, cb.order)
+	return out
 }

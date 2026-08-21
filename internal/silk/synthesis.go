@@ -24,6 +24,10 @@ const ltpMemoryMS = 20
 // current order is.
 const maxLPCOrder = 16
 
+// maxFrameLength is the longest frame at the widest internal rate, which fixes the excitation
+// buffer's size whatever the current frame's is.
+const maxFrameLength = 20 * WideBand
+
 // SynthesisState is what a channel carries between frames.
 type SynthesisState struct {
 	// outBuf holds recent output, which the long-term filter re-whitens to recover its own state.
@@ -32,6 +36,10 @@ type SynthesisState struct {
 	lpcState [maxLPCOrder]int32
 	// prevGainQ16 is the last subframe's gain, used to rescale the state when the gain moves.
 	prevGainQ16 int32
+	// exc holds the last decoded frame's excitation, which concealment draws its noise from. A
+	// shorter frame overwrites only its own length, so the tail is whatever an earlier one left —
+	// which is what the reference reads too.
+	exc [maxFrameLength]int32
 
 	rateKHz      int
 	subframeLen  int
@@ -106,13 +114,17 @@ func analysisFilter(out, in []int16, aQ12 []int16, length, order int) {
 }
 
 // Synthesise turns one frame's excitation and parameters into samples.
+//
+// lossCount and prevSignalType describe what came before, because the first frame after a run of
+// concealment is bridged rather than started clean: see the voiced-to-unvoiced case below.
 func (s *SynthesisState) Synthesise(ix Indices, p Params, lags []int, ltpQ14 []int16,
-	ltpScaleQ14 int16, pulses []int, subframes int,
+	ltpScaleQ14 int16, pulses []int, subframes int, lossCount, prevSignalType, lagPrev int,
 ) []int16 {
 	frameLength := subframes * s.subframeLen
 	out := make([]int16, frameLength)
 
 	exc := excitation(pulses, ix.SignalType, ix.QuantOffsetType, ix.Seed)
+	copy(s.exc[:], exc)
 	interpolated := ix.NLSFInterpolation < 4
 
 	// The long-term state runs to twice a frame so that a subframe can reach a full lag behind its
@@ -128,6 +140,18 @@ func (s *SynthesisState) Synthesise(ix Indices, p Params, lags []int, ltpQ14 []i
 		// The frame's two halves may use different filters, where the first was interpolated.
 		aQ12 := p.LPCQ12[k>>1]
 		bQ14 := ltpQ14[k*ltpOrder:]
+		signalType := ix.SignalType
+
+		// A concealed voiced stretch followed by an unvoiced frame drops the periodicity all at
+		// once, which is heard as a click. The frame's first half is bridged instead: it keeps the
+		// concealed pitch at a quarter gain and only then lets the unvoiced coding take over.
+		if lossCount > 0 && prevSignalType == TypeVoiced && ix.SignalType != TypeVoiced &&
+			k < MaxSubframesInFrame/2 {
+			bQ14 = make([]int16, ltpOrder)
+			bQ14[ltpOrder/2] = 1 << 12
+			signalType = TypeVoiced
+			lags[k] = lagPrev
+		}
 
 		gainQ10 := p.GainsQ16[k] >> 6
 		invGainQ31 := inverse32VarQ(p.GainsQ16[k], 47)
@@ -144,7 +168,7 @@ func (s *SynthesisState) Synthesise(ix Indices, p Params, lags []int, ltpQ14 []i
 		s.prevGainQ16 = p.GainsQ16[k]
 
 		var lag int
-		if ix.SignalType == TypeVoiced {
+		if signalType == TypeVoiced {
 			lag = lags[k]
 
 			// Where the short-term filter has just changed, the long-term state has to be rebuilt
@@ -177,7 +201,7 @@ func (s *SynthesisState) Synthesise(ix Indices, p Params, lags []int, ltpQ14 []i
 		}
 
 		residual := exc[k*s.subframeLen : (k+1)*s.subframeLen]
-		if ix.SignalType == TypeVoiced {
+		if signalType == TypeVoiced {
 			predicted := make([]int32, s.subframeLen)
 			at := ltpIndex - lag + ltpOrder/2
 			for i := range s.subframeLen {
@@ -207,10 +231,16 @@ func (s *SynthesisState) Synthesise(ix Indices, p Params, lags []int, ltpQ14 []i
 	}
 
 	copy(s.lpcState[:], lpc[:maxLPCOrder])
-
-	// Keep the tail of the output for the next frame's long-term filter to reach back into.
-	moved := s.ltpMemoryLen - frameLength
-	copy(s.outBuf, s.outBuf[frameLength:frameLength+moved])
-	copy(s.outBuf[moved:], out)
+	s.pushOutput(out)
 	return out
+}
+
+// pushOutput keeps the tail of a frame for the next one's long-term filter to reach back into.
+//
+// Concealment produces a frame the same way and needs the same history behind it, so this is
+// separate from the synthesis that usually precedes it.
+func (s *SynthesisState) pushOutput(out []int16) {
+	moved := s.ltpMemoryLen - len(out)
+	copy(s.outBuf, s.outBuf[len(out):len(out)+moved])
+	copy(s.outBuf[moved:], out)
 }
