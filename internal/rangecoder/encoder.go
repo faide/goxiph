@@ -116,6 +116,18 @@ func (e *Encoder) EncodeSymbol(k int, cdf []uint32) {
 	e.Encode(cdf[k], cdf[k+1], cdf[len(cdf)-1])
 }
 
+// EncodeICDF writes symbol k into a context given as an inverse cumulative distribution.
+func (e *Encoder) EncodeICDF(k int, icdf []byte, ftb uint) {
+	r := e.rng >> ftb
+	if k > 0 {
+		e.val += e.rng - r*uint32(icdf[k-1])
+		e.rng = r * uint32(icdf[k-1]-icdf[k])
+	} else {
+		e.rng -= r * uint32(icdf[k])
+	}
+	e.normalize()
+}
+
 // EncodeBitLogp writes a single bit whose probability of being zero is 1 - 2^-logp.
 func (e *Encoder) EncodeBitLogp(bit int, logp uint32) {
 	r := e.rng

@@ -152,5 +152,12 @@ curl -fsSL -o .specs/rfc7845-oggopus.txt  https://www.rfc-editor.org/rfc/rfc7845
 curl -fsSL -o .specs/rfc9639-flac.txt     https://www.rfc-editor.org/rfc/rfc9639.txt
 curl -fsSL -o .specs/vorbis-i-spec.html   https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
 curl -fsSL -o .specs/v-comment.html       https://www.xiph.org/vorbis/doc/v-comment.html
+
+# RFC 6716 embeds its reference implementation as base64 and states the archive's SHA1. Opus tables
+# the prose never prints are checked against it, so extracting it keeps those checks runnable.
+grep '^   ###' .specs/rfc6716-opus.txt | sed -e 's/...###//' | base64 --decode > .specs/opus-rfc6716.tar.gz
+echo "86a927223e73d2476646a1b933fcd3fffb6ecc8c  .specs/opus-rfc6716.tar.gz" | sha1sum -c -
+tar xzf .specs/opus-rfc6716.tar.gz -C .specs
+
 ls -la .specs
 '''

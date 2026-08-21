@@ -6,8 +6,10 @@ the portions of goxiph derived from them.
 
 --------------------------------------------------------------------------
 
-internal/celt/laplace.go adapts the Laplace entropy coder from celt/laplace.c
-of the reference implementation published in RFC 6716.
+internal/celt/laplace.go adapts the Laplace entropy coder, and
+internal/celt/energy.go adapts the coarse energy probability model and the
+prediction coefficients, from celt/laplace.c and celt/quant_bands.c of the
+reference implementation published in RFC 6716.
 
   Copyright 1994-2011 IETF Trust, Xiph.Org, Skype Limited, Octasic,
                       Jean-Marc Valin, Timothy B. Terriberry,

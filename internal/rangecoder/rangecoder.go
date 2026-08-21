@@ -151,6 +151,31 @@ func (d *Decoder) DecodeSymbol(cdf []uint32) int {
 	return k
 }
 
+// DecodeICDF reads a symbol from a context given as an inverse cumulative distribution.
+//
+// icdf holds the complement of the cumulative frequencies, scaled to 1<<ftb and ending at zero. The
+// form lets the search walk downward and stop on a comparison, avoiding the division Decode needs.
+func (d *Decoder) DecodeICDF(icdf []byte, ftb uint) int {
+	s := d.rng
+	dv := d.val
+	r := s >> ftb
+
+	ret := -1
+	var t uint32
+	for {
+		t = s
+		ret++
+		s = r * uint32(icdf[ret])
+		if dv >= s {
+			break
+		}
+	}
+	d.val = dv - s
+	d.rng = t - s
+	d.normalize()
+	return ret
+}
+
 // DecodeBitLogp reads a single bit whose probability of being zero is 1 - 2^-logp.
 func (d *Decoder) DecodeBitLogp(logp uint32) int {
 	r := d.rng
