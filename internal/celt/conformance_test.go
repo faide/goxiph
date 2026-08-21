@@ -221,3 +221,47 @@ func TestConformanceAllocationTablesMatchReference(t *testing.T) {
 func bytesIndex(haystack []byte, needle string) int {
 	return bytes.Index(haystack, []byte(needle))
 }
+
+// TestConformanceSpreadTablesMatchReference checks the spreading constants against their source.
+//
+// Both are short enough to have been typed, which is exactly when a transposed digit survives every
+// other test: the rotation still round-trips and still preserves the norm at the wrong angle.
+func TestConformanceSpreadTablesMatchReference(t *testing.T) {
+	readInts := func(file, pattern string, want int) []int {
+		raw, err := os.ReadFile(referenceSource + "/celt/" + file)
+		if err != nil {
+			t.Skipf("reference implementation not extracted: %v", err)
+		}
+		body := regexp.MustCompile(pattern).FindSubmatch(raw)
+		if body == nil {
+			t.Fatalf("could not find %s in %s", pattern, file)
+		}
+		var out []int
+		for _, m := range regexp.MustCompile(`\d+`).FindAll(body[1], -1) {
+			v, err := strconv.Atoi(string(m))
+			if err != nil {
+				t.Fatalf("parsing %q: %v", m, err)
+			}
+			out = append(out, v)
+		}
+		if len(out) != want {
+			t.Fatalf("%s holds %d values, want %d", file, len(out), want)
+		}
+		return out
+	}
+
+	icdf := readInts("celt.c", `spread_icdf\[4] *= *\{(.*?)\};`, 4)
+	for i, w := range icdf {
+		if got := int(spreadICDF[i]); got != w {
+			t.Errorf("spreadICDF[%d] = %d, reference has %d", i, got, w)
+		}
+	}
+
+	factor := readInts("vq.c", `SPREAD_FACTOR\[3] *= *\{(.*?)\};`, 3)
+	for i, w := range factor {
+		if got := spreadFactor[i]; got != w {
+			t.Errorf("spreadFactor[%d] = %d, reference has %d", i, got, w)
+		}
+	}
+	t.Logf("spreading tables match: icdf %v, factor %v", icdf, factor)
+}

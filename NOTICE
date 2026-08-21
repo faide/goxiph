@@ -16,6 +16,14 @@ in RFC 6716:
               from celt/modes.c and celt/static_modes_float.h
   interp.go   the allocation interpolation and fine/shape split,
               from celt/rate.c
+  spreading.go  the spreading rotation and collapse mask, from celt/vq.c,
+              and the spreading decision distribution, from celt/celt.c
+  transforms.go  the Haar and Hadamard reshaping, the bit-exact cosine and
+              log-tangent, the split angle resolution and the noise
+              generator, from celt/bands.c and celt/rate.h
+
+  internal/celt/testdata/gen_bitexact.c reproduces three of those functions
+  from the same source, to generate the vectors they are checked against.
 
   Copyright 1994-2011 IETF Trust, Xiph.Org, Skype Limited, Octasic,
                       Jean-Marc Valin, Timothy B. Terriberry,
