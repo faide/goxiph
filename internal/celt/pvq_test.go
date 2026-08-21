@@ -203,13 +203,6 @@ func TestSplitRequiredMarksTheBoundary(t *testing.T) {
 	}
 }
 
-func abs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
 // TestPVQIndexIsABijection checks that every index in range maps to a distinct vector with the right
 // pulse count, which is what makes the codebook complete.
 func TestPVQIndexIsABijection(t *testing.T) {

@@ -58,6 +58,14 @@ type Decoder struct {
 	// pf is the previous frame's post-filter and pfOld the one before it. The transform's output
 	// spans both, so the filter cross-fades across two frames rather than switching at a boundary.
 	pf, pfOld PostFilter
+
+	// Concealment state: how many frames have been concealed in a row, the period the last one
+	// repeated at, the prediction filter fitted to it, and a running floor of the band energies to
+	// fall back to once repetition has gone on too long.
+	lossCount  int
+	lastPitch  int
+	lpc        [2][]float32
+	background [2][]float32
 }
 
 // NewDecoder returns a decoder for the given channel count and band range.
@@ -87,6 +95,8 @@ func NewDecoder(channels, start, end int) (*Decoder, error) {
 		d.logE[c] = make([]float32, NumBands)
 		d.prev1[c] = make([]float32, NumBands)
 		d.prev2[c] = make([]float32, NumBands)
+		d.background[c] = make([]float32, NumBands)
+		d.lpc[c] = make([]float32, lpcOrder)
 		for i := range NumBands {
 			d.prev1[c][i] = silenceEnergy
 			d.prev2[c][i] = silenceEnergy
@@ -273,7 +283,9 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 
 	d.synthesise(out, n, lm, transient, pf)
 
-	d.advanceHistory(transient)
+	// A frame decoded is a frame not concealed.
+	d.lossCount = 0
+	d.advanceHistory(transient, 1<<uint(lm))
 	// The range coder's own state seeds the next frame's noise, and is what a reference decode
 	// reports for comparison.
 	d.rng = dec.Range()
@@ -292,7 +304,7 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 //
 // A transient frame does not become the new history outright; it only lowers it. Its energies are
 // measured over short blocks and would otherwise make the next frame predict from a peak.
-func (d *Decoder) advanceHistory(transient bool) {
+func (d *Decoder) advanceHistory(transient bool, m int) {
 	// The coded count, not the delivered one: a mono packet leaves the second channel's energies
 	// standing in for its own, so that a later stereo packet predicts from something.
 	if d.streamChannels == 1 {
@@ -307,6 +319,11 @@ func (d *Decoder) advanceHistory(transient bool) {
 		} else {
 			copy(d.prev2[c], d.prev1[c])
 			copy(d.prev1[c], d.logE[c])
+			// A slow floor that follows the quiet parts and ignores the loud ones, which is what
+			// concealment falls back to once repeating the signal has gone on too long.
+			for i := range NumBands {
+				d.background[c][i] = min(d.background[c][i]+float32(m)*0.001, d.logE[c][i])
+			}
 		}
 
 		// Bands outside the coded range hold nothing, and must not be predicted from.

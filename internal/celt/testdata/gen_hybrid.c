@@ -99,6 +99,19 @@ int main(int argc, char **argv)
       printf("whole %d", n * channels);
       for (int i = 0; i < n * channels; i++) printf(" %.9g", (double)whole[i]);
       printf("\n");
+
+      /* What the transform codec would play if the next packet never arrived. A copy of the decoder
+         is used, so that asking the question does not change the answer to the next one. */
+      {
+         CELTDecoder *cc = malloc(celt_decoder_get_size(channels));
+         memcpy(cc, cd, celt_decoder_get_size(channels));
+         opus_val16 lost[960 * 2];
+         celt_decode_with_ec(cc, NULL, 0, lost, 960, NULL);
+         printf("lost %d", 960 * channels);
+         for (int i = 0; i < 960 * channels; i++) printf(" %.9g", (double)lost[i]);
+         printf("\n");
+         free(cc);
+      }
    }
 
    opus_decoder_destroy(od);
