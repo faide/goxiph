@@ -34,7 +34,11 @@ func LogToAmplitude(amp, logE []float32, start, end int) {
 			amp[i] = 0
 			continue
 		}
-		amp[i] = float32(math.Exp2(float64(logE[i] + eMean(i))))
+		// The level is capped before the conversion, because an extreme stream can otherwise name a
+		// log energy whose linear value is past what a single-precision float holds, and the band
+		// would come out as not-a-number. RFC 8251 section 8.
+		lg := min(logE[i]+eMean(i), 32)
+		amp[i] = float32(math.Exp2(float64(lg)))
 	}
 }
 

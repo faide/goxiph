@@ -104,8 +104,15 @@ func inversePredGain(aQ12 []int16) int32 {
 		previous := current
 		current = work[k&1]
 		for n := range k {
-			tmp := previous[n] - mulFracQ(previous[k-n-1], rcQ31, 31)
-			current[n] = mulFracQ(tmp, rcMult2, mult2Q)
+			// Both steps are widened: a crafted stream can drive either past what fits in a word,
+			// and a filter that does is unstable by definition rather than by arithmetic accident.
+			// RFC 8251 section 6.
+			tmp := subSat32(previous[n], mulFracQ(previous[k-n-1], rcQ31, 31))
+			wide := rshiftRound64(int64(tmp)*int64(rcMult2), mult2Q)
+			if wide > 2147483647 || wide < -2147483648 {
+				return 0
+			}
+			current[n] = int32(wide)
 		}
 	}
 

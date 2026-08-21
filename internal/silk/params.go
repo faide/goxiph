@@ -176,7 +176,10 @@ func stabiliseNLSF(nlsfQ15 []int16, deltaMinQ15 []int16, order int) {
 	sortAscending(nlsfQ15[:order])
 	nlsfQ15[0] = max(nlsfQ15[0], deltaMinQ15[0])
 	for i := 1; i < order; i++ {
-		nlsfQ15[i] = max(nlsfQ15[i], int16(int32(nlsfQ15[i-1])+int32(deltaMinQ15[i])))
+		// The sum is saturated rather than allowed to wrap: an extreme stream can name frequencies
+		// whose spacing overflows, and a wrapped value would order them backwards. RFC 8251
+		// section 7.
+		nlsfQ15[i] = max(nlsfQ15[i], addSat16(nlsfQ15[i-1], deltaMinQ15[i]))
 	}
 	nlsfQ15[order-1] = min(nlsfQ15[order-1], int16(1<<15-int32(deltaMinQ15[order])))
 	for i := order - 2; i >= 0; i-- {

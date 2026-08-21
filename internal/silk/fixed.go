@@ -195,3 +195,18 @@ func div32VarQ(a, b int32, qres uint) int32 {
 func randStep(seed int32) int32 {
 	return 907633515 + seed*196314165
 }
+
+// subSat32 subtracts, clamping rather than wrapping.
+func subSat32(a, b int32) int32 {
+	d := int64(a) - int64(b)
+	return int32(limit64(d))
+}
+
+// addSat16 adds two 16-bit values, clamping rather than wrapping.
+func addSat16(a, b int16) int16 {
+	return sat16(int32(a) + int32(b))
+}
+
+func limit64(v int64) int64 {
+	return min(max(v, -2147483648), 2147483647)
+}

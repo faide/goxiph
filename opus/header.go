@@ -30,6 +30,12 @@ const (
 	MappingFamilyMono = 0
 	// MappingFamilySurround is 1 to 8 channels in the Vorbis order, with a mapping table.
 	MappingFamilySurround = 1
+	// MappingFamilyAmbisonics is ambisonic components in channel-number order, optionally followed
+	// by a stereo pair, with the same mapping table as family 1. RFC 8486 section 3.1.
+	MappingFamilyAmbisonics = 2
+	// MappingFamilyAmbisonicsMatrix is ambisonics reconstructed by multiplying the decoded channels
+	// by a matrix the header carries in place of a channel mapping. RFC 8486 section 3.2.
+	MappingFamilyAmbisonicsMatrix = 3
 	// MappingFamilyDiscrete is unidentified channels, with a mapping table.
 	MappingFamilyDiscrete = 255
 )
@@ -48,6 +54,15 @@ type Head struct {
 	StreamCount    int
 	CoupledCount   int
 	ChannelMapping []byte
+
+	// DemixingMatrix is carried instead of a channel mapping by family 3, and is empty otherwise.
+	// Its entries are signed and in row-major order, one row per output channel.
+	DemixingMatrix []int16
+
+	// Undecodable marks a header whose channel mapping family this implementation does not know.
+	// RFC 8486 section 5.2: nothing past the first nineteen octets may be relied on, and the
+	// packets must not be decoded.
+	Undecodable bool
 }
 
 // PreSkipSamples is the audio to discard from the start of the stream, at the 48 kHz decode rate.
@@ -94,10 +109,20 @@ func ParseHead(data []byte) (Head, error) {
 		return h, nil
 	}
 
-	// Every other family carries the mapping table.
-	if len(data) < 21+h.Channels {
-		return h, fmt.Errorf("%w: mapping table wants %d bytes, header holds %d",
-			ErrBadHeader, 21+h.Channels, len(data))
+	switch h.MappingFamily {
+	case MappingFamilySurround, MappingFamilyAmbisonics, MappingFamilyDiscrete,
+		MappingFamilyAmbisonicsMatrix:
+	default:
+		// A family this implementation does not know may lay its mapping table out in any shape, so
+		// reading one would be guessing. Everything up to here is fixed by the format and stands.
+		// RFC 8486 section 5.2.
+		h.Undecodable = true
+		return h, nil
+	}
+
+	if len(data) < 21 {
+		return h, fmt.Errorf("%w: mapping table wants at least 21 bytes, header holds %d",
+			ErrBadHeader, len(data))
 	}
 	h.StreamCount = int(data[19])
 	h.CoupledCount = int(data[20])
@@ -107,17 +132,37 @@ func ParseHead(data []byte) (Head, error) {
 	if h.CoupledCount > h.StreamCount {
 		return h, fmt.Errorf("%w: %d coupled streams of %d total", ErrBadHeader, h.CoupledCount, h.StreamCount)
 	}
-	if h.StreamCount+h.CoupledCount > 255 {
-		return h, fmt.Errorf("%w: %d decoded channels exceed 255", ErrBadHeader, h.StreamCount+h.CoupledCount)
+	decoded := h.StreamCount + h.CoupledCount
+	if decoded > 255 {
+		return h, fmt.Errorf("%w: %d decoded channels exceed 255", ErrBadHeader, decoded)
 	}
 
+	if h.MappingFamily == MappingFamilyAmbisonicsMatrix {
+		// The matrix stands in for the channel mapping: every output channel is a combination of
+		// the decoded ones rather than a choice among them.
+		want := 2 * decoded * h.Channels
+		if len(data) < 21+want {
+			return h, fmt.Errorf("%w: demixing matrix wants %d bytes, header holds %d",
+				ErrBadHeader, 21+want, len(data))
+		}
+		h.DemixingMatrix = make([]int16, decoded*h.Channels)
+		for i := range h.DemixingMatrix {
+			h.DemixingMatrix[i] = int16(binary.LittleEndian.Uint16(data[21+2*i:]))
+		}
+		return h, nil
+	}
+
+	if len(data) < 21+h.Channels {
+		return h, fmt.Errorf("%w: mapping table wants %d bytes, header holds %d",
+			ErrBadHeader, 21+h.Channels, len(data))
+	}
 	h.ChannelMapping = make([]byte, h.Channels)
 	copy(h.ChannelMapping, data[21:21+h.Channels])
 	for i, m := range h.ChannelMapping {
 		// 255 marks a silent channel; anything else must name a decoded one.
-		if m != 255 && int(m) >= h.StreamCount+h.CoupledCount {
+		if m != 255 && int(m) >= decoded {
 			return h, fmt.Errorf("%w: channel %d maps to %d, only %d decoded channels exist",
-				ErrBadHeader, i, m, h.StreamCount+h.CoupledCount)
+				ErrBadHeader, i, m, decoded)
 		}
 	}
 	return h, nil

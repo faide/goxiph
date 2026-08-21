@@ -297,3 +297,18 @@ func (d *Decoder) SkipTo(bits int) {
 		d.nbitsTotal += delta
 	}
 }
+
+// Shrink removes bytes from the end of the coder's buffer.
+//
+// An Opus packet may reserve its last bytes for a redundant frame carried alongside the main one.
+// Those bytes belong to a separate decoder, and the raw bits this one reads backwards from the end
+// must stop short of them. RFC 6716 section 4.4.
+func (d *Decoder) Shrink(bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	if bytes > len(d.data) {
+		bytes = len(d.data)
+	}
+	d.data = d.data[:len(d.data)-bytes]
+}

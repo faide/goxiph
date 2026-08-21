@@ -659,17 +659,6 @@ func TestConformanceDecoderMatchesReference(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			s := readStream(t, path)
 
-			supported := true
-			for _, p := range s.packets {
-				if p.Mode == ModeHybrid {
-					supported = false
-					break
-				}
-			}
-			if !supported {
-				t.Skip("stream holds a mode that is not written yet")
-			}
-
 			dec, err := NewDecoder(s.head.Channels)
 			if err != nil {
 				t.Fatalf("new decoder: %v", err)
@@ -708,6 +697,11 @@ func TestConformanceDecoderMatchesReference(t *testing.T) {
 					len(ours[0]), skip, len(ref[0]))
 			}
 
+			// One bound for every mode. The reference implementation RFC 6716 embeds predates the
+			// corrections of RFC 8251, which this decoder implements; opusdec carries a libopus new
+			// enough to have them, so the two agree.
+			const tolerance = 1e-4
+
 			for c := range ref {
 				var dot, ea, eb, worst float64
 				for i := range ref[c] {
@@ -724,8 +718,9 @@ func TestConformanceDecoderMatchesReference(t *testing.T) {
 				if corr := dot / math.Sqrt(ea*eb); corr < 0.99999 {
 					t.Fatalf("channel %d: correlation %.7f", c, corr)
 				}
-				if worst > 1e-4 {
-					t.Fatalf("channel %d: worst sample differs by %v", c, worst)
+				if worst > tolerance {
+					t.Fatalf("channel %d: worst sample differs by %v, over the %v allowed",
+						c, worst, tolerance)
 				}
 			}
 

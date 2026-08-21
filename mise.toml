@@ -157,6 +157,9 @@ mkdir -p .specs
 curl -fsSL -o .specs/rfc3533-ogg.txt      https://www.rfc-editor.org/rfc/rfc3533.txt
 curl -fsSL -o .specs/rfc6716-opus.txt     https://www.rfc-editor.org/rfc/rfc6716.txt
 curl -fsSL -o .specs/rfc7845-oggopus.txt  https://www.rfc-editor.org/rfc/rfc7845.txt
+# RFC 6716 and 7845 are each amended by a later RFC. Both are normative; neither is optional.
+curl -fsSL -o .specs/rfc8251-opus-update.txt   https://www.rfc-editor.org/rfc/rfc8251.txt
+curl -fsSL -o .specs/rfc8486-opus-ambisonics.txt https://www.rfc-editor.org/rfc/rfc8486.txt
 curl -fsSL -o .specs/rfc9639-flac.txt     https://www.rfc-editor.org/rfc/rfc9639.txt
 curl -fsSL -o .specs/vorbis-i-spec.html   https://www.xiph.org/vorbis/doc/Vorbis_I_spec.html
 curl -fsSL -o .specs/v-comment.html       https://www.xiph.org/vorbis/doc/v-comment.html

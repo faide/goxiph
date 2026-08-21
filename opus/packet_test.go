@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -344,4 +345,100 @@ func FuzzParsePacket(f *testing.F) {
 			t.Fatalf("frames and padding total %d bytes from a %d byte packet", total, len(data))
 		}
 	})
+}
+
+// buildHead assembles an identification header for a mapping family test.
+func buildHead(channels, family int, tail []byte) []byte {
+	h := make([]byte, 19)
+	copy(h, "OpusHead")
+	h[8] = 1
+	h[9] = byte(channels)
+	binary.LittleEndian.PutUint16(h[10:], 312)
+	binary.LittleEndian.PutUint32(h[12:], 48000)
+	h[18] = byte(family)
+	return append(h, tail...)
+}
+
+// TestHeadAmbisonicsFamilyTwo checks that family 2 reads the same mapping table as family 1.
+//
+// RFC 8486 section 3.1 gives ambisonics the layout family 1 already uses, so nothing about the
+// parsing changes; what changes is that the family is no longer reserved and must be accepted.
+func TestHeadAmbisonicsFamilyTwo(t *testing.T) {
+	h, err := ParseHead(buildHead(4, MappingFamilyAmbisonics, []byte{3, 1, 0, 1, 2, 3}))
+	if err != nil {
+		t.Fatalf("family 2: %v", err)
+	}
+	if h.Undecodable {
+		t.Error("family 2 was treated as unknown")
+	}
+	if h.StreamCount != 3 || h.CoupledCount != 1 {
+		t.Errorf("streams %d coupled %d, want 3 and 1", h.StreamCount, h.CoupledCount)
+	}
+	if len(h.ChannelMapping) != 4 {
+		t.Errorf("mapping holds %d channels, want 4", len(h.ChannelMapping))
+	}
+	if len(h.DemixingMatrix) != 0 {
+		t.Error("family 2 produced a demixing matrix, which only family 3 carries")
+	}
+}
+
+// TestHeadAmbisonicsMatrixFamilyThree covers the one family whose mapping table has a different
+// shape: a matrix in place of the per-channel mapping. RFC 8486 section 3.2.
+func TestHeadAmbisonicsMatrixFamilyThree(t *testing.T) {
+	// Two streams, one coupled, so three decoded channels feeding two output channels.
+	const streams, coupled, channels = 2, 1, 2
+	decoded := streams + coupled
+
+	tail := []byte{streams, coupled}
+	for i := range decoded * channels {
+		tail = binary.LittleEndian.AppendUint16(tail, uint16(int16(-1000+i*500)))
+	}
+
+	h, err := ParseHead(buildHead(channels, MappingFamilyAmbisonicsMatrix, tail))
+	if err != nil {
+		t.Fatalf("family 3: %v", err)
+	}
+	if len(h.DemixingMatrix) != decoded*channels {
+		t.Fatalf("matrix holds %d entries, want %d", len(h.DemixingMatrix), decoded*channels)
+	}
+	for i, v := range h.DemixingMatrix {
+		if want := int16(-1000 + i*500); v != want {
+			t.Errorf("matrix entry %d is %d, want %d", i, v, want)
+		}
+	}
+	if len(h.ChannelMapping) != 0 {
+		t.Error("family 3 produced a channel mapping, which the matrix replaces")
+	}
+
+	// A matrix that runs past the header is a truncated header, not a short matrix.
+	if _, err := ParseHead(buildHead(channels, MappingFamilyAmbisonicsMatrix, tail[:len(tail)-2])); err == nil {
+		t.Error("a truncated demixing matrix was accepted")
+	}
+}
+
+// TestHeadUnknownFamilyStopsAtNineteenOctets covers the rule RFC 8486 section 5.2 replaced.
+//
+// The earlier text had a demuxer treat an unrecognised family as family 255, which means reading a
+// mapping table whose layout that family need not use. Nothing past the fixed nineteen octets can be
+// relied on, so nothing past them is read.
+func TestHeadUnknownFamilyStopsAtNineteenOctets(t *testing.T) {
+	// A tail that would be a valid family 1 table, to show it is not being read.
+	h, err := ParseHead(buildHead(2, 7, []byte{9, 9, 9, 9}))
+	if err != nil {
+		t.Fatalf("unknown family: %v", err)
+	}
+	if !h.Undecodable {
+		t.Fatal("an unknown family was not marked undecodable")
+	}
+	if h.Channels != 2 || h.PreSkip != 312 || h.InputRate != 48000 {
+		t.Error("the fixed part of the header was not read")
+	}
+	if h.StreamCount != 0 || len(h.ChannelMapping) != 0 || len(h.DemixingMatrix) != 0 {
+		t.Error("a mapping table was read for a family whose layout is unknown")
+	}
+
+	// The header must still parse with nothing after the family octet at all.
+	if _, err := ParseHead(buildHead(2, 7, nil)); err != nil {
+		t.Errorf("a bare unknown-family header was rejected: %v", err)
+	}
 }

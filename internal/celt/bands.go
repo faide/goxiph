@@ -572,8 +572,28 @@ func DecodeBands(dec *rangecoder.Decoder, p *BandParams) uint32 {
 
 		// The folding source only moves forward while bands are getting a bit per sample or better;
 		// past that, folding from a starved band would spread its damage upward.
-		if start-n >= m*BandEdges[p.Start] && (updateLowband || lowbandOffset == 0) {
+		//
+		// The second band is admitted whether or not it qualifies, so that it always has something
+		// to fold from. RFC 8251 section 9.
+		if (start-n >= m*BandEdges[p.Start] || i == p.Start+1) && (updateLowband || lowbandOffset == 0) {
 			lowbandOffset = i
+		}
+
+		// The second band is wider than the first, so folding it needs more than the first band
+		// holds. Repeating part of the first band fills the gap; without it the band falls back to
+		// noise, which on a transient is heard as pre-echo. RFC 8251 section 9.
+		//
+		// For a CELT-only frame the two bands are the same width and this copies nothing.
+		if i == p.Start+1 {
+			n1 := m * (BandEdges[p.Start+1] - BandEdges[p.Start])
+			n2 := m * (BandEdges[p.Start+2] - BandEdges[p.Start+1])
+			offset := m * BandEdges[p.Start]
+			if n2 > n1 {
+				copy(norm[offset+n1:offset+n2], norm[offset+2*n1-n2:offset+n1])
+				if norm2 != nil {
+					copy(norm2[offset+n1:offset+n2], norm2[offset+2*n1-n2:offset+n1])
+				}
+			}
 		}
 
 		tfChange := p.TFRes[i]
