@@ -15,6 +15,7 @@
 #include "main.h"
 #include "stack_alloc.h"
 #include "entdec.h"
+#include <string.h>
 
 static void dumpi(const char *name, const opus_int *v, int n) {
    printf("%s", name);
@@ -157,6 +158,19 @@ int main(int argc, char **argv)
             printf("\n");
             printf("ltpscaleq14 %d %d %d\n", i, n, (int)ctrl.LTP_scale_Q14);
          }
+
+         /* Synthesis, then the output-buffer update silk_decode_frame does around it. Both are
+            needed: the long-term filter reaches back into that buffer next frame. */
+         opus_int16 xq[MAX_FRAME_LENGTH];
+         silk_decode_core(&st[n], &ctrl, xq, pulses);
+         printf("out %d %d %d", i, n, (int)st[n].frame_length);
+         for (int k = 0; k < st[n].frame_length; k++) printf(" %d", (int)xq[k]);
+         printf("\n");
+
+         int mv_len = st[n].ltp_mem_length - st[n].frame_length;
+         memmove(st[n].outBuf, &st[n].outBuf[st[n].frame_length], mv_len * sizeof(opus_int16));
+         memcpy(&st[n].outBuf[mv_len], xq, st[n].frame_length * sizeof(opus_int16));
+         st[n].lagPrev = ctrl.pitchL[st[n].nb_subfr - 1];
 
          /* silk_decode_frame clears this once a frame has decoded, and the interpolation of the
             next frame's first half depends on it. Without this the dump shows every frame

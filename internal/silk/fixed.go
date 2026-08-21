@@ -159,3 +159,39 @@ func abs32(a int32) int32 {
 func lshiftSat32(a int32, shift uint) int32 {
 	return limit(a, int32(-2147483648)>>shift, int32(2147483647)>>shift) << shift
 }
+
+// div32VarQ approximates a divided by b, shifted left by qres.
+//
+// Like inverse32VarQ this is an approximation the format specifies rather than a plain division:
+// its result adjusts the filter state between subframes, so a decoder that divided exactly would
+// carry a different state forward.
+func div32VarQ(a, b int32, qres uint) int32 {
+	if b == 0 {
+		return 0
+	}
+
+	aHead := uint(bits.LeadingZeros32(uint32(abs32(a)))) - 1
+	bHead := uint(bits.LeadingZeros32(uint32(abs32(b)))) - 1
+	aNorm := a << aHead
+	bNorm := b << bHead
+
+	invB := (int32(0x7FFFFFFF) >> 2) / (bNorm >> 16)
+	result := smulwb(aNorm, invB)
+	// The residual is allowed to wrap; what is left of it after the subtraction is always small.
+	aNorm -= smmul(bNorm, result) << 3
+	result = smlawb(result, aNorm, invB)
+
+	shift := 29 + int(aHead) - int(bHead) - int(qres)
+	if shift < 0 {
+		return lshiftSat32(result, uint(-shift))
+	}
+	if shift < 32 {
+		return result >> uint(shift)
+	}
+	return 0
+}
+
+// randStep advances the sign randomiser the excitation uses. It wraps, which is the point.
+func randStep(seed int32) int32 {
+	return 907633515 + seed*196314165
+}
