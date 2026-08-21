@@ -108,6 +108,10 @@ if [ "$missing" -ne 0 ]; then
 fi
 '''
 
+[tasks."silk:tables"]
+description = "Regenerate the SILK constant tables from the extracted reference"
+run = "go run ./internal/testutil/silktables -out internal/silk/tables.go"
+
 [tasks.fixtures]
 description = "Synthesise the test corpus into testdata/generated; media is generated, never committed"
 depends = ["doctor"]

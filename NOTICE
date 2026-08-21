@@ -48,5 +48,13 @@ in RFC 6716:
 
   Licensed under the BSD 3-Clause License. See RFC 6716 for the full text.
 
+internal/silk transcribes the SILK constant tables of RFC 6716 section 4.2
+from the same reference implementation, under the same licence. The
+transcription is performed by internal/testutil/silktables and checked back
+against the reference by the package's conformance test.
+
+internal/silk/testdata/gen_silk.c links against that reference to generate
+the vectors the decoder is checked against.
+
 RFC 6716 names this coder and describes its role but does not state the
 procedure, so the reference implementation is its only normative statement.
