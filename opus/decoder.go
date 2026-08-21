@@ -177,8 +177,10 @@ func (d *Decoder) decodeSILK(p *Packet, frame []byte, samples, coded int) ([][]f
 
 	out := make([][]float32, coded)
 	for c := range out {
-		out[c] = make([]float32, len(pcm))
-		for i, v := range pcm {
+		// A mono payload in a stereo packet is not possible: the coded count comes from the same
+		// byte SILK was told about, so every coded channel is present.
+		out[c] = make([]float32, len(pcm[c]))
+		for i, v := range pcm[c] {
 			out[c][i] = float32(v) / 32768
 		}
 	}

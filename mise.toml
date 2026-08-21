@@ -108,6 +108,10 @@ if [ "$missing" -ne 0 ]; then
 fi
 '''
 
+[tasks."fixtures:forced"]
+description = "Build the fixtures opusenc cannot produce, using the reference encoder"
+run = "go run ./internal/testutil/refenc -out testdata/generated"
+
 [tasks."silk:tables"]
 description = "Regenerate the SILK constant tables from the extracted reference"
 run = "go run ./internal/testutil/silktables -out internal/silk/tables.go"

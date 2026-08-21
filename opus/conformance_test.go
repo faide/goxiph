@@ -661,7 +661,7 @@ func TestConformanceDecoderMatchesReference(t *testing.T) {
 
 			supported := true
 			for _, p := range s.packets {
-				if p.Mode == ModeHybrid || (p.Mode == ModeSILK && p.Stereo) {
+				if p.Mode == ModeHybrid {
 					supported = false
 					break
 				}
