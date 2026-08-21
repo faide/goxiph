@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -360,4 +361,108 @@ func TestConformanceFullSetupHeader(t *testing.T) {
 	if floorTypes[1] == 0 {
 		t.Error("no floor 1 encountered")
 	}
+}
+
+// TestConformanceSetupHeaderSurvivesRewrite re-serialises every real setup header in the corpus and
+// checks it parses back the same.
+//
+// libvorbis picks configurations no hand-written sample would: books of a hundred entries with
+// sparse lengths and lattice lookups, floors of nine partitions, residues cascading two passes. The
+// writer is exercised against those rather than against what its author thought to try.
+//
+// The check is that the parsed structures agree, not that the bytes do. Where a header can be
+// written more than one way — the ordered length form, an unused field's padding — libvorbis and
+// this writer choose differently, and neither choice is more correct.
+func TestConformanceSetupHeaderSurvivesRewrite(t *testing.T) {
+	books, floors, residues := 0, 0, 0
+
+	for _, path := range corpus(t, "*hz_*ch.ogg") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			packets := headerPackets(t, path, 3)
+			if len(packets) < 3 {
+				t.Fatalf("got %d packets, want 3", len(packets))
+			}
+			info, err := ParseInfo(packets[0])
+			if err != nil {
+				t.Fatalf("ParseInfo: %v", err)
+			}
+			want, err := ParseSetup(packets[2], info)
+			if err != nil {
+				t.Fatalf("ParseSetup: %v", err)
+			}
+			// Floor 0 is parsed but not represented, so it cannot be written back.
+			for _, f := range want.Floors {
+				if f.Type != 1 {
+					t.Skipf("floor type %d cannot be re-emitted", f.Type)
+				}
+			}
+
+			packet, err := want.AppendTo(nil)
+			if err != nil {
+				t.Fatalf("AppendTo: %v", err)
+			}
+			got, err := ParseSetup(packet, info)
+			if err != nil {
+				t.Fatalf("reparsing our own header: %v", err)
+			}
+
+			if len(got.Codebooks) != len(want.Codebooks) {
+				t.Fatalf("%d codebooks, want %d", len(got.Codebooks), len(want.Codebooks))
+			}
+			for i := range want.Codebooks {
+				a, b := want.Codebooks[i], got.Codebooks[i]
+				if a.Dimensions != b.Dimensions || a.Entries != b.Entries ||
+					a.LookupType != b.LookupType || a.LookupValues != b.LookupValues {
+					t.Fatalf("codebook %d: %d/%d lookup %d/%d, want %d/%d lookup %d/%d",
+						i, b.Dimensions, b.Entries, b.LookupType, b.LookupValues,
+						a.Dimensions, a.Entries, a.LookupType, a.LookupValues)
+				}
+				if !reflect.DeepEqual(a.lengths, b.lengths) {
+					t.Fatalf("codebook %d lengths differ", i)
+				}
+				if !reflect.DeepEqual(a.Multiplicands, b.Multiplicands) {
+					t.Fatalf("codebook %d multiplicands differ", i)
+				}
+				// The packed float is coarse, so the values are compared as the decoder sees them
+				// rather than as bits.
+				if a.MinimumValue != b.MinimumValue || a.DeltaValue != b.DeltaValue {
+					t.Fatalf("codebook %d lookup scale %v/%v, want %v/%v",
+						i, b.MinimumValue, b.DeltaValue, a.MinimumValue, a.DeltaValue)
+				}
+				books++
+			}
+
+			for i := range want.Floors {
+				a, b := want.Floors[i].One, got.Floors[i].One
+				if !reflect.DeepEqual(a.PartitionClassList, b.PartitionClassList) ||
+					!reflect.DeepEqual(a.ClassDimensions, b.ClassDimensions) ||
+					!reflect.DeepEqual(a.ClassSubclasses, b.ClassSubclasses) ||
+					!reflect.DeepEqual(a.ClassMasterbooks, b.ClassMasterbooks) ||
+					!reflect.DeepEqual(a.SubclassBooks, b.SubclassBooks) ||
+					!reflect.DeepEqual(a.XList, b.XList) || a.Multiplier != b.Multiplier {
+					t.Fatalf("floor %d differs", i)
+				}
+				floors++
+			}
+
+			for i := range want.Residues {
+				a, b := want.Residues[i], got.Residues[i]
+				if a.Type != b.Type || a.Begin != b.Begin || a.End != b.End ||
+					a.PartitionSize != b.PartitionSize || a.Classifications != b.Classifications ||
+					a.Classbook != b.Classbook ||
+					!reflect.DeepEqual(a.Cascade, b.Cascade) || !reflect.DeepEqual(a.Books, b.Books) {
+					t.Fatalf("residue %d differs", i)
+				}
+				residues++
+			}
+
+			if !reflect.DeepEqual(want.Mappings, got.Mappings) {
+				t.Fatal("mappings differ")
+			}
+			if !reflect.DeepEqual(want.Modes, got.Modes) {
+				t.Fatal("modes differ")
+			}
+		})
+	}
+	t.Logf("%d codebooks, %d floors and %d residues survived a rewrite", books, floors, residues)
 }
