@@ -218,6 +218,13 @@ func run(out, dur string) error {
 		return err
 	}
 	count++
+	// The same signal through SILK, where the sharp level changes reach the floor that stops a gain
+	// falling more than sixteen steps at once. A steady tone never approaches it.
+	if err := tool("opusenc", "--quiet", "--speech", "--bitrate", "12", "--framesize", "20",
+		clicks, filepath.Join(out, "opus_silk_bursts.opus")); err != nil {
+		return err
+	}
+	count++
 
 	// A stereo stream, so the channel count is not always one.
 	if err := tool("opusenc", "--quiet", "--bitrate", "128", src,

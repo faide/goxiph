@@ -79,6 +79,9 @@ var tables = []table{
 	{"silk_lsb_iCDF", "lsbICDF", ""},
 	{"silk_sign_iCDF", "signICDF", "an excitation sign, by signal type, quantiser offset and pulse count"},
 
+	// Line spectral to filter conversion.
+	{"silk_LSFCosTab_FIX_Q12", "lsfCosTable", "a cosine sampled at 128 points, for turning frequencies into filter roots"},
+
 	// Stereo.
 	{"silk_stereo_pred_quant_Q13", "stereoPredictionLevels", ""},
 	{"silk_stereo_pred_joint_iCDF", "stereoPredictionJointICDF", ""},

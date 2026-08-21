@@ -44,6 +44,15 @@ type refFrame struct {
 
 	// pulses is the excitation the reference decoded, one entry per sample.
 	pulses []int
+
+	// gainsQ16 and the two coefficient sets are what the indices expand into.
+	gainsQ16 []int
+	lpc1     []int
+	lpc0     []int
+
+	pitchLags   []int
+	ltpCoefQ14  []int
+	ltpScaleQ14 int
 }
 
 // readVectors parses the reference dump.
@@ -121,6 +130,33 @@ func readVectors(t *testing.T) []vectorCase {
 			for i := 4; i < len(fields); i++ {
 				f.pulses = append(f.pulses, atoi(i))
 			}
+		case "gainsq16":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.gainsQ16 = append(f.gainsQ16, atoi(i))
+			}
+		case "lpc":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 4; i < len(fields); i++ {
+				f.lpc1 = append(f.lpc1, atoi(i))
+			}
+		case "lpc0":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.lpc0 = append(f.lpc0, atoi(i))
+			}
+		case "pitchl":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.pitchLags = append(f.pitchLags, atoi(i))
+			}
+		case "ltpcoef":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.ltpCoefQ14 = append(f.ltpCoefQ14, atoi(i))
+			}
+		case "ltpscaleq14":
+			cur.frames[len(cur.frames)-1].ltpScaleQ14 = atoi(3)
 		case "pitch":
 			f := &cur.frames[len(cur.frames)-1]
 			f.voiced = true

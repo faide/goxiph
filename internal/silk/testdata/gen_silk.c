@@ -157,6 +157,12 @@ int main(int argc, char **argv)
             printf("\n");
             printf("ltpscaleq14 %d %d %d\n", i, n, (int)ctrl.LTP_scale_Q14);
          }
+
+         /* silk_decode_frame clears this once a frame has decoded, and the interpolation of the
+            next frame's first half depends on it. Without this the dump shows every frame
+            declining to interpolate. */
+         st[n].first_frame_after_reset = 0;
+         st[n].prevSignalType = ix->signalType;
       }
    }
    printf("finalrange %u\n", (unsigned)dec.rng);

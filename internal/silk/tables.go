@@ -84,7 +84,7 @@ var pitchLagICDF = [32]uint8{
 	32, 25, 19, 15, 13, 11, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
 }
 
-// pitchContourICDF is the per-subframe deviation from the frame's lag, wideband.
+// pitchContourICDFTable is the per-subframe deviation from the frame's lag, wideband.
 // Transcribed from silk_pitch_contour_iCDF of the reference implementation.
 var pitchContourICDFTable = [34]uint8{
 	223, 201, 183, 167, 152, 138, 124, 111, 98, 88, 79, 70, 62, 56, 50, 44,
@@ -345,6 +345,20 @@ var signICDF = [42]uint8{
 	254, 49, 67, 77, 82, 93, 99, 198, 11, 18, 24, 31, 36, 45, 255, 46,
 	66, 78, 87, 94, 104, 208, 14, 21, 32, 42, 51, 66, 255, 94, 104, 109,
 	112, 115, 118, 248, 53, 69, 80, 88, 95, 102,
+}
+
+// lsfCosTable is a cosine sampled at 128 points, for turning frequencies into filter roots.
+// Transcribed from silk_LSFCosTab_FIX_Q12 of the reference implementation.
+var lsfCosTable = [129]int16{
+	8192, 8190, 8182, 8170, 8152, 8130, 8104, 8072, 8034, 7994, 7946, 7896, 7840, 7778, 7714, 7644,
+	7568, 7490, 7406, 7318, 7226, 7128, 7026, 6922, 6812, 6698, 6580, 6458, 6332, 6204, 6070, 5934,
+	5792, 5648, 5502, 5352, 5198, 5040, 4880, 4718, 4552, 4382, 4212, 4038, 3862, 3684, 3502, 3320,
+	3136, 2948, 2760, 2570, 2378, 2186, 1990, 1794, 1598, 1400, 1202, 1002, 802, 602, 402, 202,
+	0, -202, -402, -602, -802, -1002, -1202, -1400, -1598, -1794, -1990, -2186, -2378, -2570, -2760, -2948,
+	-3136, -3320, -3502, -3684, -3862, -4038, -4212, -4382, -4552, -4718, -4880, -5040, -5198, -5352, -5502, -5648,
+	-5792, -5934, -6070, -6204, -6332, -6458, -6580, -6698, -6812, -6922, -7026, -7128, -7226, -7318, -7406, -7490,
+	-7568, -7644, -7714, -7778, -7840, -7896, -7946, -7994, -8034, -8072, -8104, -8130, -8152, -8170, -8182, -8190,
+	-8192,
 }
 
 // Transcribed from silk_stereo_pred_quant_Q13 of the reference implementation.
