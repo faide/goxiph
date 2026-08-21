@@ -265,3 +265,75 @@ func TestConformanceSpreadTablesMatchReference(t *testing.T) {
 	}
 	t.Logf("spreading tables match: icdf %v, factor %v", icdf, factor)
 }
+
+// TestConformancePulseCacheMatchesReference checks the computed cost curves against the table the
+// reference ships.
+//
+// The reference stores 392 bytes of precomputed costs plus a 105-entry index. Those are computed
+// here instead, from the same recurrence the quantiser uses, so this is what says the computation
+// reproduces the table exactly. Getting it wrong would charge bands the wrong number of bits and
+// desynchronise every stream.
+func TestConformancePulseCacheMatchesReference(t *testing.T) {
+	raw, err := os.ReadFile(referenceSource + "/celt/static_modes_float.h")
+	if err != nil {
+		t.Skipf("reference implementation not extracted: %v", err)
+	}
+
+	read := func(pattern string, want int) []int {
+		body := regexp.MustCompile(pattern).FindSubmatch(raw)
+		if body == nil {
+			t.Fatalf("could not find %s in the reference", pattern)
+		}
+		var out []int
+		for _, m := range regexp.MustCompile(`-?\d+`).FindAll(body[1], -1) {
+			v, err := strconv.Atoi(string(m))
+			if err != nil {
+				t.Fatalf("parsing %q: %v", m, err)
+			}
+			out = append(out, v)
+		}
+		if len(out) != want {
+			t.Fatalf("reference holds %d values, want %d", len(out), want)
+		}
+		return out
+	}
+
+	wantIndex := read(`(?s)cache_index50\[105] = \{(.*?)\};`, 105)
+	wantBits := read(`(?s)cache_bits50\[392] = \{(.*?)\};`, 392)
+
+	c := newPulseCache()
+	if len(c.index) != len(wantIndex) {
+		t.Fatalf("computed %d index entries, reference has %d", len(c.index), len(wantIndex))
+	}
+	if len(c.bits) != len(wantBits) {
+		t.Fatalf("computed %d cost bytes, reference has %d", len(c.bits), len(wantBits))
+	}
+	for i, w := range wantIndex {
+		if got := int(c.index[i]); got != w {
+			t.Fatalf("index[%d] (frame %d band %d): computed %d, reference has %d",
+				i, i/NumBands, i%NumBands, got, w)
+		}
+	}
+	for i, w := range wantBits {
+		if got := int(c.bits[i]); got != w {
+			t.Fatalf("cost byte %d: computed %d, reference has %d", i, got, w)
+		}
+	}
+	t.Logf("all %d index entries and %d cost bytes match, with no table transcribed",
+		len(wantIndex), len(wantBits))
+}
+
+// TestConformanceLogNIsDerivable checks the per-band log-width table against the expression the
+// reference computes it from.
+//
+// It is transcribed in alloc.go and checked entry by entry elsewhere, so agreeing with log2Frac here
+// is an independent statement that the fixed-point logarithm rounds the way the format needs.
+func TestConformanceLogNIsDerivable(t *testing.T) {
+	for i := range NumBands {
+		width := uint32(BandEdges[i+1] - BandEdges[i])
+		if got, want := int(logN[i]), log2Frac(width, BitRes); got != want {
+			t.Errorf("logN[%d]: table has %d, log2Frac of width %d gives %d", i, got, width, want)
+		}
+	}
+	t.Logf("all %d log-widths agree with log2Frac", NumBands)
+}

@@ -54,6 +54,11 @@ func TestBitexactMatchesReference(t *testing.T) {
 				t.Fatalf("bitexactLog2Tan(%d, %d) = %d, reference has %d",
 					isin, icos, got, want)
 			}
+		case "log2frac":
+			val, frac, want := num(1), num(2), num(3)
+			if got := log2Frac(uint32(val), frac); got != want {
+				t.Fatalf("log2Frac(%d, %d) = %d, reference has %d", val, frac, got, want)
+			}
 		case "qn":
 			n, b, off, cap_, st, want := num(1), num(2), num(3), num(4), num(5), num(6)
 			if got := computeQn(n, b, off, cap_, st == 1); got != want {
@@ -70,13 +75,13 @@ func TestBitexactMatchesReference(t *testing.T) {
 	}
 
 	// A truncated or mis-parsed file would otherwise pass by checking nothing.
-	for _, kind := range []string{"cos", "log2tan", "qn"} {
+	for _, kind := range []string{"cos", "log2tan", "log2frac", "qn"} {
 		if counts[kind] == 0 {
 			t.Fatalf("no %s vectors were checked", kind)
 		}
 	}
-	t.Logf("matched the reference on %d cosines, %d log-tangents and %d qn cases",
-		counts["cos"], counts["log2tan"], counts["qn"])
+	t.Logf("matched the reference on %d cosines, %d log-tangents, %d logarithms and %d qn cases",
+		counts["cos"], counts["log2tan"], counts["log2frac"], counts["qn"])
 }
 
 // TestBitexactCosIsAFallingCosine checks the approximation behaves like the function it stands in

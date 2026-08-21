@@ -22,7 +22,10 @@ in RFC 6716:
               log-tangent, the split angle resolution and the noise
               generator, from celt/bands.c and celt/rate.h
 
-  internal/celt/testdata/gen_bitexact.c reproduces three of those functions
+  pulsecache.go  the pseudo-pulse scale, the fixed-point logarithm and the
+              pulse cost cache, from celt/rate.c, celt/rate.h and celt/cwrs.c
+
+  internal/celt/testdata/gen_bitexact.c reproduces four of those functions
   from the same source, to generate the vectors they are checked against.
 
   Copyright 1994-2011 IETF Trust, Xiph.Org, Skype Limited, Octasic,

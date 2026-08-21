@@ -42,6 +42,28 @@ static int bitexact_log2tan(int isin,int icos)
          -FRAC_MUL16(icos, FRAC_MUL16(icos, -2597) + 7932);
 }
 
+/* celt/cwrs.c */
+static int log2_frac(uint32_t val, int frac)
+{
+  int l;
+  l=EC_ILOG(val);
+  if(val&(val-1)){
+    if(l>16)val=(val>>(l-16))+(((val&((1<<(l-16))-1))+(1<<(l-16))-1)>>(l-16));
+    else val<<=16-l;
+    l=(l-1)<<frac;
+    do{
+      int b;
+      b=(int)(val>>16);
+      l+=b<<frac;
+      val=(val+b)>>b;
+      val=(val*val+0x7FFF)>>15;
+    }
+    while(frac-->0);
+    return l+(val>0x8000);
+  }
+  else return (l-1)<<frac;
+}
+
 /* celt/bands.c */
 static int compute_qn(int N, int b, int offset, int pulse_cap, int stereo)
 {
@@ -73,6 +95,22 @@ int main(void)
       int b = bitexact_cos((int16_t)(16384-i));
       printf("log2tan %d %d %d\n", a, b, bitexact_log2tan(a,b));
    }
+
+   printf("# log2frac: val frac -> log2_frac(val,frac)\n");
+   for (uint32_t v = 1; v < 4096; v++)
+      printf("log2frac %u 3 %d\n", v, log2_frac(v, 3));
+   for (int e = 0; e < 32; e++) {
+      uint32_t base = (e < 31) ? (1u << e) : 0x80000000u;
+      uint32_t offs[] = {0, 1, 2, 3, 7, 12345, 65535};
+      for (int o = 0; o < 7; o++) {
+         uint32_t v = base + offs[o];
+         if (v == 0) continue;
+         for (int f = 0; f <= 4; f++)
+            printf("log2frac %u %d %d\n", v, f, log2_frac(v, f));
+      }
+   }
+   printf("log2frac %u 3 %d\n", 4573910u, log2_frac(4573910u, 3));
+   printf("log2frac %u 3 %d\n", 4294967295u, log2_frac(4294967295u, 3));
 
    printf("# qn: N b offset pulse_cap stereo -> qn\n");
    int Ns[] = {2,3,4,8,16,32,64,100,176};

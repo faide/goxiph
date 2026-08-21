@@ -250,11 +250,16 @@ func pvqRow(n, maxK int) []uint32 {
 }
 
 // costOf converts a codebook size to eighths of a bit.
+//
+// This defers to the reference's fixed-point logarithm rather than rounding math.Log2, because the
+// two do not always agree: log2Frac rounds up at its intermediate steps, so for some sizes it
+// charges an eighth more than the exact ceiling. Charging the exact value would allocate differently
+// from every other decoder. V(11,9) is one such size.
 func costOf(v uint32) int {
 	if v <= 1 {
 		return 0
 	}
-	return int(math.Ceil(math.Log2(float64(v)) * (1 << BitRes)))
+	return log2Frac(v, BitRes)
 }
 
 // Normalise scales an integer shape vector to unit norm, writing the result into out.
