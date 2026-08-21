@@ -206,9 +206,9 @@ func (d *Decoder) Decode(dec *rangecoder.Decoder, frameMS int) ([][]int16, error
 		// window that reaches back past the frame's start.
 		mid := make([]int16, length+2)
 		side := make([]int16, length+2)
-		copy(mid[2:], d.decodeFrame(dec, 0, mode, header.VAD[0][i], subframes))
+		copy(mid[2:], d.decodeFrame(dec, 0, mode, header.VAD[0][i], false, subframes))
 		if stereo && !midOnly {
-			copy(side[2:], d.decodeFrame(dec, 1, mode, header.VAD[1][i], subframes))
+			copy(side[2:], d.decodeFrame(dec, 1, mode, header.VAD[1][i], false, subframes))
 		}
 
 		if stereo {
@@ -234,6 +234,83 @@ func (d *Decoder) Decode(dec *rangecoder.Decoder, frameMS int) ([][]int16, error
 		}
 	}
 	return out, nil
+}
+
+// DecodeFEC reads the redundant copies of earlier frames a packet carries, in place of its own.
+//
+// An encoder told to expect loss puts a low-rate copy of each frame into the packet after it. Where
+// a packet does not arrive, the next one can stand in: what plays is then the lost audio at a lower
+// rate rather than an extrapolation of it. A frame with no copy is concealed as before.
+func (d *Decoder) DecodeFEC(dec *rangecoder.Decoder, frameMS int) ([][]int16, error) {
+	d.config.FrameMS = frameMS
+	if err := d.config.Validate(); err != nil {
+		return nil, err
+	}
+
+	header, err := DecodeHeader(dec, d.config)
+	if err != nil {
+		return nil, err
+	}
+
+	frames := d.config.FramesPerPacket()
+	subframes := d.config.Subframes()
+	stereo := d.config.Channels == 2
+	length := d.config.FrameLength()
+
+	out := make([][]int16, d.config.Channels)
+	for i := range frames {
+		// The prediction is coded only where the mid channel has a copy; otherwise the last one
+		// stands, as it does for a packet that never arrived at all.
+		pred := d.stereo.PrevPrediction()
+		midOnly := false
+		if stereo && header.LBRRFrame[0][i] {
+			pred = DecodeStereoPrediction(dec)
+			if !header.LBRRFrame[1][i] {
+				midOnly = DecodeMidOnly(dec)
+			}
+		}
+		if stereo && !midOnly && d.prevMidOnly {
+			d.resetSide()
+		}
+		hasSide := !d.prevMidOnly || (stereo && header.LBRRFrame[1][i])
+
+		mid := make([]int16, length+2)
+		side := make([]int16, length+2)
+		copy(mid[2:], d.fecFrame(dec, 0, i, header, subframes, length))
+		if stereo && hasSide {
+			copy(side[2:], d.fecFrame(dec, 1, i, header, subframes, length))
+		}
+
+		if stereo {
+			d.stereo.MidSideToLeftRight(mid, side, pred, d.config.SampleRateKHz, length)
+			d.prevMidOnly = midOnly
+		} else {
+			d.stereo.BufferMono(mid, length)
+		}
+		out[0] = append(out[0], d.resample[0].Resample(mid[1:length+1])...)
+		if stereo {
+			out[1] = append(out[1], d.resample[1].Resample(side[1:length+1])...)
+		}
+	}
+	return out, nil
+}
+
+// fecFrame reads one channel's redundant copy, or conceals where the packet carries none.
+func (d *Decoder) fecFrame(dec *rangecoder.Decoder, channel, i int, h Header,
+	subframes, length int,
+) []int16 {
+	if !h.LBRRFrame[channel][i] {
+		return d.concealFrame(channel, length)
+	}
+	// A redundant frame refers back only to the frame before it, and only where that one had a copy
+	// of its own.
+	mode := CodeIndependently
+	if i > 0 && h.LBRRFrame[channel][i-1] {
+		mode = CodeConditionally
+	}
+	// A redundant copy is always of active speech, so it reads from the active distribution whatever
+	// the activity flags say.
+	return d.decodeFrame(dec, channel, mode, true, true, subframes)
 }
 
 // skipRedundant reads past the low-bitrate redundancy a packet may carry.
@@ -266,12 +343,12 @@ func (d *Decoder) skipRedundant(dec *rangecoder.Decoder, h Header, frames, subfr
 
 // decodeFrame reads one channel's frame and synthesises it at the internal rate.
 func (d *Decoder) decodeFrame(dec *rangecoder.Decoder, channel int, mode CodingMode,
-	active bool, subframes int,
+	active, lbrr bool, subframes int,
 ) []int16 {
 	cb := codebookFor(d.config.SampleRateKHz)
 	st := &d.ch[channel]
 
-	ix := DecodeIndices(dec, d.config, &st.frames, mode, active, false)
+	ix := DecodeIndices(dec, d.config, &st.frames, mode, active, lbrr)
 	pulses := DecodePulses(dec, ix.SignalType, ix.QuantOffsetType, d.config.FrameLength())
 
 	var p Params

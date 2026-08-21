@@ -612,10 +612,12 @@ func DecodeBands(dec *rangecoder.Decoder, p *BandParams) uint32 {
 					break
 				}
 			}
+			// The range stops at this band: with the first band duplicated above, the search would
+			// otherwise run past what has been coded. RFC 8251 section 9.
 			foldEnd := lowbandOffset - 1
 			for {
 				foldEnd++
-				if m*BandEdges[foldEnd] >= effectiveLowband+n {
+				if foldEnd >= i || m*BandEdges[foldEnd] >= effectiveLowband+n {
 					break
 				}
 			}

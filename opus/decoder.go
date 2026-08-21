@@ -123,7 +123,7 @@ func (d *Decoder) Decode(packet []byte) ([][]float32, error) {
 
 	out := make([][]float32, d.channels)
 	for _, frame := range p.Frames {
-		got, err := d.decodeFrame(p, frame, frameSamples, coded)
+		got, err := d.decodeFrame(p, frame, frameSamples, coded, false)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +148,7 @@ const (
 // entropy decoder where the transform codec starts reading, the cross-fade has to be generated
 // before this packet touches either codec's state, and a codec is not restarted until the frames
 // that need its old state have been produced.
-func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]float32, error) {
+func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int, fec bool) ([][]float32, error) {
 	// A frame of one byte or none carries no symbols. The reference conceals it rather than playing
 	// silence, so that a stream which stops sending during a pause fades out instead of cutting.
 	if len(frame) <= 1 {
@@ -187,10 +187,13 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		if p.Mode == ModeHybrid {
 			rate = hybridSILKRate
 		}
-		if low, err = d.decodeSILK(p, dec, samples, coded, rate); err != nil {
+		if low, err = d.decodeSILK(p, dec, samples, coded, rate, fec); err != nil {
 			return nil, err
 		}
-		red = readRedundancy(dec, len(frame), p.Mode == ModeHybrid)
+		// A packet read for its redundancy carries none of its own to announce.
+		if !fec {
+			red = readRedundancy(dec, len(frame), p.Mode == ModeHybrid)
+		}
 	}
 
 	if red.present {
@@ -235,7 +238,14 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		if hadPrev && p.Mode != prevMode && !prevRedundancy {
 			d.celt = nil
 		}
-		if out, err = d.decodeCELT(p, dec, red.length, samples, coded, start); err != nil {
+		if fec {
+			// The redundancy covers only the bands the predictor codes, so the rest is extrapolated
+			// exactly as it would be for a packet that never arrived.
+			out = d.silence(samples)
+			if err := d.concealCELT(out, samples, start); err != nil {
+				return nil, err
+			}
+		} else if out, err = d.decodeCELT(p, dec, red.length, samples, coded, start); err != nil {
 			return nil, err
 		}
 	}
@@ -299,6 +309,43 @@ func (d *Decoder) celtSilence(p *Packet, coded int, out [][]float32) error {
 	return nil
 }
 
+// DecodeFEC recovers a lost packet from the redundancy the packet after it carries.
+//
+// The argument is the packet that did arrive, and samples how long the one before it was; a
+// container knows that where the codec cannot. Where the arriving packet carries no redundancy the
+// result is the same extrapolation Conceal gives.
+func (d *Decoder) DecodeFEC(packet []byte, samples int) ([][]float32, error) {
+	p, err := ParsePacket(packet)
+	if err != nil {
+		return nil, err
+	}
+	if samples <= 0 {
+		return nil, fmt.Errorf("opus: %d samples to recover", samples)
+	}
+
+	coded := 1
+	if p.Stereo {
+		coded = 2
+	}
+	frameSamples := p.Samples() / len(p.Frames)
+	if p.Samples() > samples {
+		return nil, fmt.Errorf("opus: %d samples of redundancy for a %d sample gap", p.Samples(), samples)
+	}
+	d.bandwidth, d.coded, d.frameSamples = p.Bandwidth, coded, frameSamples
+
+	out := make([][]float32, d.channels)
+	for _, frame := range p.Frames {
+		got, err := d.decodeFrame(p, frame, frameSamples, coded, true)
+		if err != nil {
+			return nil, err
+		}
+		for c := range out {
+			out[c] = append(out[c], got[c]...)
+		}
+	}
+	return out, nil
+}
+
 // Conceal produces the samples of a packet that never arrived.
 //
 // The duration is the caller's to give: Opus carries no length for a packet a decoder never saw, and
@@ -355,22 +402,33 @@ func (d *Decoder) concealFrame(samples int) ([][]float32, error) {
 		}
 	}
 
-	if d.prevMode != ModeSILK && d.celt != nil {
-		if err := d.celt.Configure(d.coded, start(d.prevMode), endBandFor(d.bandwidth)); err != nil {
+	if d.prevMode != ModeSILK {
+		if err := d.concealCELT(out, samples, start(d.prevMode)); err != nil {
 			return nil, err
-		}
-		size, err := celt.FrameSizeForSamples(min(samples, maxCELTSamples))
-		if err != nil {
-			return nil, err
-		}
-		high := d.celt.Conceal(size)
-		for c := range out {
-			for i := range out[c] {
-				out[c][i] += high[c][i]
-			}
 		}
 	}
 	return out, nil
+}
+
+// concealCELT adds the transform codec's extrapolation of one frame to out.
+func (d *Decoder) concealCELT(out [][]float32, samples, start int) error {
+	if d.celt == nil {
+		return nil
+	}
+	if err := d.celt.Configure(d.coded, start, endBandFor(d.bandwidth)); err != nil {
+		return err
+	}
+	size, err := celt.FrameSizeForSamples(min(samples, maxCELTSamples))
+	if err != nil {
+		return err
+	}
+	high := d.celt.Conceal(size)
+	for c := range out {
+		for i := range out[c] {
+			out[c][i] += high[c][i]
+		}
+	}
+	return nil
 }
 
 // start is the first CELT band a mode codes.
@@ -406,7 +464,7 @@ func (d *Decoder) decodeCELT(p *Packet, dec *rangecoder.Decoder, length, samples
 	return decoded.PCM, nil
 }
 
-func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded, rate int) ([][]float32, error) {
+func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded, rate int, fec bool) ([][]float32, error) {
 	if rate == 0 {
 		return nil, fmt.Errorf("opus: SILK does not code %s", p.Bandwidth)
 	}
@@ -436,7 +494,11 @@ func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded,
 		d.silkRate = rate
 	}
 
-	pcm, err := d.silk.Decode(dec, frameMS)
+	decode := d.silk.Decode
+	if fec {
+		decode = d.silk.DecodeFEC
+	}
+	pcm, err := decode(dec, frameMS)
 	if err != nil {
 		return nil, err
 	}

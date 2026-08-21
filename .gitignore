@@ -15,3 +15,4 @@
 
 # Local tool state.
 .mise.local.toml
+/.specs/opus-rfc8251/

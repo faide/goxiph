@@ -5,7 +5,11 @@
    packet after a loss decodes from the state concealment left, so a single loss in isolation
    exercises only half of it.
 
-   Build (from the extracted reference root):
+   The reference to build against is a corrected copy: the source frozen into RFC 6716 predates
+   RFC 8251, and hybrid frames differ without its folding change. `mise run specs:corrected` makes
+   one from the extracted tree.
+
+   Build (from the corrected reference root):
      gcc -O2 -DVAR_ARRAYS -DOPUS_BUILD -w -I celt -I silk -I silk/float -I include -I src \
          -o gen gen_opus_plc.c $(ls src/*.c|grep -vE 'demo|compare') silk/*.c silk/float/*.c \
          $(ls celt/*.c|grep -v demo) -lm

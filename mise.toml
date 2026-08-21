@@ -129,6 +129,10 @@ run = "go run ./internal/testutil/refenc -out testdata/generated"
 description = "Regenerate the SILK constant tables from the extracted reference"
 run = "go run ./internal/testutil/silktables -out internal/silk/tables.go"
 
+[tasks."specs:corrected"]
+description = "Copy the extracted reference and apply the RFC 8251 corrections, for building oracles"
+run = "python3 internal/testutil/rfc8251.py .specs/opus-rfc6716 .specs/opus-rfc8251"
+
 [tasks.fixtures]
 description = "Synthesise the test corpus into testdata/generated; media is generated, never committed"
 depends = ["doctor"]

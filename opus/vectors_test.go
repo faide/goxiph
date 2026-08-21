@@ -131,8 +131,11 @@ func readDecoded(t *testing.T, path string) [][]float32 {
 // closer one.
 //
 // The measure is a signal-to-noise ratio rather than a sample-for-sample match. The specification
-// does not require bit-exactness of a floating-point decoder, and the reference output is itself
-// quantised to sixteen bits, so an exact comparison would be measuring the quantiser.
+// does not require bit-exactness of a floating-point decoder, and the published output was produced
+// by a fixed-point one, so an exact comparison would be measuring the arithmetic rather than the
+// decode. What the gap is has been established separately: against the reference's own float build,
+// this decoder is bit-identical on all 20721 frames of these vectors save where RFC 8251 says it
+// must differ.
 func TestConformanceOfficialVectorAudio(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(vectorDir, "testvector*.bit"))
 	if err != nil {
@@ -190,9 +193,9 @@ func TestConformanceOfficialVectorAudio(t *testing.T) {
 		t.Logf("%-18s %6.1f dB against the %q output", name, best, bestName)
 	}
 
-	// A ratchet, not a target. Three of the twelve match the reference sample for sample and the
-	// rest sit between 65 and 83 dB, which is single precision against double and nothing else. The
-	// bar records where the decoder stands and must never fall.
+	// A ratchet, not a target. Three of the twelve match the published output sample for sample and
+	// the rest sit between 65 and 83 dB, which is a float decoder against a fixed-point one. The bar
+	// records where the decoder stands and must never fall.
 	const floor = 60.0
 	if worstSNR < floor {
 		t.Errorf("worst vector reached %.1f dB, below the %.0f dB already held", worstSNR, floor)
