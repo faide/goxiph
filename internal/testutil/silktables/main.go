@@ -46,7 +46,7 @@ var tables = []table{
 	// Pitch.
 	{"silk_pitch_delta_iCDF", "pitchDeltaICDF", "a pitch lag coded as a change from the previous frame's"},
 	{"silk_pitch_lag_iCDF", "pitchLagICDF", "the high bits of an absolutely coded pitch lag"},
-	{"silk_pitch_contour_iCDF", "pitchContourICDF", "the per-subframe deviation from the frame's lag, wideband"},
+	{"silk_pitch_contour_iCDF", "pitchContourICDFTable", "the per-subframe deviation from the frame's lag, wideband"},
 	{"silk_pitch_contour_NB_iCDF", "pitchContourNBICDF", "the same, narrowband"},
 	{"silk_pitch_contour_10_ms_iCDF", "pitchContour10msICDF", "the same, in a ten millisecond frame"},
 	{"silk_pitch_contour_10_ms_NB_iCDF", "pitchContour10msNBICDF", ""},

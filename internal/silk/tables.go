@@ -86,7 +86,7 @@ var pitchLagICDF = [32]uint8{
 
 // pitchContourICDF is the per-subframe deviation from the frame's lag, wideband.
 // Transcribed from silk_pitch_contour_iCDF of the reference implementation.
-var pitchContourICDF = [34]uint8{
+var pitchContourICDFTable = [34]uint8{
 	223, 201, 183, 167, 152, 138, 124, 111, 98, 88, 79, 70, 62, 56, 50, 44,
 	39, 35, 31, 27, 24, 21, 18, 16, 14, 12, 10, 8, 6, 4, 3, 2,
 	1, 0,

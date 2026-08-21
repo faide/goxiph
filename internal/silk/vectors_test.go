@@ -20,6 +20,30 @@ type vectorCase struct {
 	lbrr [2]int
 	// lbrrFrames is indexed by channel.
 	lbrrFrames [2][]int
+
+	// frames holds what the reference decoded for each played frame, in order.
+	frames []refFrame
+}
+
+// refFrame is one frame's worth of the reference's decode.
+type refFrame struct {
+	index, channel int
+	signalType     int
+	quantOffset    int
+	interpolation  int
+	seed           int
+	gainIndices    []int
+	nlsfIndices    []int
+
+	voiced        bool
+	lagIndex      int
+	contourIndex  int
+	periodicity   int
+	ltpScaleIndex int
+	ltpIndices    []int
+
+	// pulses is the excitation the reference decoded, one entry per sample.
+	pulses []int
 }
 
 // readVectors parses the reference dump.
@@ -75,6 +99,35 @@ func readVectors(t *testing.T) []vectorCase {
 			ch := atoi(1)
 			for i := 2; i < len(fields); i++ {
 				cur.lbrrFrames[ch] = append(cur.lbrrFrames[ch], atoi(i))
+			}
+		case "frame":
+			cur.frames = append(cur.frames, refFrame{
+				index: atoi(1), channel: atoi(2),
+				signalType: atoi(4), quantOffset: atoi(5),
+				interpolation: atoi(7), seed: atoi(9),
+			})
+		case "gainidx":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.gainIndices = append(f.gainIndices, atoi(i))
+			}
+		case "nlsfidx":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 3; i < len(fields); i++ {
+				f.nlsfIndices = append(f.nlsfIndices, atoi(i))
+			}
+		case "pulses":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 4; i < len(fields); i++ {
+				f.pulses = append(f.pulses, atoi(i))
+			}
+		case "pitch":
+			f := &cur.frames[len(cur.frames)-1]
+			f.voiced = true
+			f.lagIndex, f.contourIndex = atoi(4), atoi(6)
+			f.periodicity, f.ltpScaleIndex = atoi(8), atoi(10)
+			for i := 12; i < len(fields); i++ {
+				f.ltpIndices = append(f.ltpIndices, atoi(i))
 			}
 		}
 	}
@@ -147,4 +200,116 @@ func TestVectorsCoverBothBandwidths(t *testing.T) {
 		}
 	}
 	t.Logf("vectors by rate: %v; %d active frames, %d inactive", rates, active, inactive)
+}
+
+// TestFrameSymbolsMatchReference checks each frame's codebook selections and excitation against
+// libopus.
+//
+// Everything here is read from one bitstream in a fixed order, so a symbol taken from the wrong
+// distribution or skipped shifts everything after it. Comparing the decoded fields rather than the
+// bit position is what says which one went wrong; comparing the bit position alone would only say
+// that something had.
+//
+// The excitation is decoded here rather than in a test of its own because it has to be: it sits
+// between one frame's indices and the next frame's, and skipping it desynchronises the rest of the
+// packet. That is how the multi-frame case first failed.
+func TestFrameSymbolsMatchReference(t *testing.T) {
+	cases := readVectors(t)
+	frames, voiced, conditional := 0, 0, 0
+	subframeCounts := map[int]int{}
+	nonZeroExcitation := 0
+
+	for i, c := range cases {
+		dec := rangecoder.NewDecoder(c.payload)
+		h, err := DecodeHeader(dec, c.config)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		if h.LBRR[0] || h.LBRR[1] {
+			// A packet carrying redundancy has frames before these that must be read and discarded.
+			// Nothing in the corpus does, so rather than guess at it, skip and say so.
+			continue
+		}
+
+		var st frameState
+		for _, want := range c.frames {
+			mode := CodeIndependently
+			if want.index > 0 {
+				mode = CodeConditionally
+				conditional++
+			}
+			subframeCounts[c.config.Subframes()]++
+			got := DecodeIndices(dec, c.config, &st, mode, h.VAD[want.channel][want.index], false)
+
+			check := func(name string, a, b int) {
+				t.Helper()
+				if a != b {
+					t.Fatalf("case %d frame %d channel %d: %s is %d, reference has %d",
+						i, want.index, want.channel, name, a, b)
+				}
+			}
+			check("signal type", got.SignalType, want.signalType)
+			check("quantiser offset", got.QuantOffsetType, want.quantOffset)
+			check("interpolation", got.NLSFInterpolation, want.interpolation)
+			check("seed", got.Seed, want.seed)
+			for k, w := range want.gainIndices[:c.config.Subframes()] {
+				check("gain index", got.GainIndices[k], w)
+			}
+			for k, w := range want.nlsfIndices {
+				check("line spectral index", got.NLSFIndices[k], w)
+			}
+			if want.voiced {
+				voiced++
+				check("pitch lag", got.LagIndex, want.lagIndex)
+				check("contour", got.ContourIndex, want.contourIndex)
+				check("periodicity", got.Periodicity, want.periodicity)
+				check("long-term scale", got.LTPScaleIndex, want.ltpScaleIndex)
+				for k, w := range want.ltpIndices[:c.config.Subframes()] {
+					check("long-term gain", got.LTPIndices[k], w)
+				}
+			}
+
+			// The excitation follows the indices and must be consumed before the next frame's, so
+			// this is not an optional extra even for a test of the indices alone.
+			ex := DecodePulses(dec, got.SignalType, got.QuantOffsetType, c.config.FrameLength())
+			if len(ex) != len(want.pulses) {
+				t.Fatalf("case %d frame %d: %d excitation samples, reference has %d",
+					i, want.index, len(ex), len(want.pulses))
+			}
+			for k := range ex {
+				if ex[k] != want.pulses[k] {
+					t.Fatalf("case %d frame %d sample %d: excitation %d, reference has %d",
+						i, want.index, k, ex[k], want.pulses[k])
+				}
+			}
+			for _, v := range ex {
+				if v != 0 {
+					nonZeroExcitation++
+				}
+			}
+			frames++
+		}
+	}
+
+	// Each of these is a distinct path through the decoder, and a corpus that lost one would leave
+	// it passing while testing nothing.
+	if conditional == 0 {
+		t.Error("no frame used conditional coding; delta gains and delta pitch went untested")
+	}
+	if len(subframeCounts) < 2 {
+		t.Errorf("only one subframe layout was seen: %v", subframeCounts)
+	}
+	if nonZeroExcitation == 0 {
+		t.Error("every excitation decoded to silence")
+	}
+	t.Logf("%d conditional frames, subframe layouts %v, %d non-zero excitation samples",
+		conditional, subframeCounts, nonZeroExcitation)
+
+	if frames == 0 {
+		t.Fatal("no frames were checked")
+	}
+	if voiced == 0 {
+		t.Error("no voiced frame was checked; the pitch fields went untested")
+	}
+	t.Logf("%d frames match the reference, %d of them voiced", frames, voiced)
 }

@@ -164,6 +164,14 @@ func run(out, dur string) error {
 	opusVariants := []struct{ name, tuning, bitrate, framesize string }{
 		{"opus_silk_nb", "--speech", "6", "20"},
 		{"opus_silk_wb", "--speech", "10", "20"},
+		// A packet of several SILK frames, where every frame after the first codes its gain and pitch
+		// as a change from the one before. A twenty millisecond packet holds one frame and never
+		// reaches that path.
+		{"opus_silk_60ms", "--speech", "12", "60"},
+		{"opus_silk_40ms", "--speech", "12", "40"},
+		// A ten millisecond frame halves the subframe count, which changes the pitch contour
+		// codebook and removes the interpolation symbol.
+		{"opus_silk_10ms", "--speech", "12", "10"},
 		{"opus_hybrid_fb", "--speech", "16", "20"},
 		{"opus_mixed_modes", "--speech", "64", "20"},
 		{"opus_celt_short", "--music", "96", "2.5"},
