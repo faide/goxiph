@@ -27,7 +27,7 @@ func pitchDownsample(channels [][]float32, out []float32, length int) {
 	// ring on a signal that is nearly periodic but not quite.
 	ac[0] *= 1.0001
 	for i := 1; i <= 4; i++ {
-		ac[i] -= ac[i] * (0.008 * float64(i)) * (0.008 * float64(i))
+		ac[i] -= ac[i] * (0.008 * float32(i)) * (0.008 * float32(i))
 	}
 
 	lpc := levinson(ac, 4)

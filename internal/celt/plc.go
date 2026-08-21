@@ -134,7 +134,7 @@ func (d *Decoder) concealWithPitch(n, lm int) {
 			// The same noise floor and lag window the pitch analysis uses, for the same reason.
 			ac[0] *= 1.0001
 			for i := 1; i <= lpcOrder; i++ {
-				ac[i] -= ac[i] * (0.008 * float64(i)) * (0.008 * float64(i))
+				ac[i] -= ac[i] * (0.008 * float32(i)) * (0.008 * float32(i))
 			}
 			d.lpc[c] = levinson(ac, lpcOrder)
 		}
@@ -151,15 +151,14 @@ func (d *Decoder) concealWithPitch(n, lm int) {
 
 		e := make([]float32, length+Overlap)
 		offset := combMaxPeriod - pitch
-		var s1 float64
+		var s1 float32
 		for i := range length + Overlap {
 			if offset+i >= combMaxPeriod {
 				offset -= pitch
 				decay *= decay
 			}
 			e[i] = decay * exc[offset+i]
-			t := float64(out[offset+i])
-			s1 += t * t
+			s1 += out[offset+i] * out[offset+i]
 		}
 
 		for i := range lpcOrder {
@@ -200,14 +199,14 @@ func (d *Decoder) concealWithPitch(n, lm int) {
 // fading keeps fading.
 func decayRate(exc []float32, pitch int) float32 {
 	period := min(pitch, combMaxPeriod/2)
-	e1, e2 := 1.0, 1.0
+	e1, e2 := float32(1), float32(1)
 	for i := range period {
-		a := float64(exc[combMaxPeriod-period+i])
-		b := float64(exc[combMaxPeriod-2*period+i])
+		a := exc[combMaxPeriod-period+i]
+		b := exc[combMaxPeriod-2*period+i]
 		e1 += a * a
 		e2 += b * b
 	}
-	return float32(math.Sqrt(min(e1, e2) / e2))
+	return float32(math.Sqrt(float64(min(e1, e2) / e2)))
 }
 
 // limitExplosion guards against the synthesis filter running away.
@@ -215,17 +214,17 @@ func decayRate(exc []float32, pitch int) float32 {
 // A filter fitted to one stretch of signal and driven by another can resonate, and a concealed frame
 // that grows without bound is far worse than one that is silent. The comparison is written so that a
 // value that is not a number fails it too.
-func limitExplosion(e []float32, s1 float64) {
-	var s2 float64
+func limitExplosion(e []float32, s1 float32) {
+	var s2 float32
 	for _, v := range e {
-		s2 += float64(v) * float64(v)
+		s2 += v * v
 	}
 	if !(s1 > 0.2*s2) {
 		clear(e)
 		return
 	}
 	if s1 < s2 {
-		ratio := float32(math.Sqrt((s1 + 1) / (s2 + 1)))
+		ratio := float32(math.Sqrt(float64((s1 + 1) / (s2 + 1))))
 		for i := range e {
 			e[i] *= ratio
 		}

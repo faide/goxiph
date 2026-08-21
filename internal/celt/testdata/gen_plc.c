@@ -42,12 +42,20 @@ int main(int argc, char **argv)
       const int len = 2048;
       static celt_sig buf0[2048], buf1[2048];
       celt_sig *ch[2] = { buf0, buf1 };
-      unsigned s = 12345;
+   /* The same signal the Go side builds: one period of noise repeated, plus a little fresh noise.
+      A sine would do as well but for the fixture, whose two sides must agree to the last bit; this
+      is built from a shift register and single-precision arithmetic, so they do. */
+   static float base[137];
+   unsigned s = 12345;
+   for (int i = 0; i < 137; i++) {
+      s = 1664525u * s + 1013904223u;
+      base[i] = (float)((int)(s >> 8) - 8388608) / 8388608.0f;
+   }
       for (int i = 0; i < len; i++) {
          s = 1664525u * s + 1013904223u;
-         double n = (double)((int)(s >> 8) - 8388608) / 8388608.0;
-         buf0[i] = (celt_sig)(0.4 * sin(2 * 3.14159265358979 * i / 137.0) + 0.05 * n);
-         buf1[i] = (celt_sig)(0.3 * sin(2 * 3.14159265358979 * i / 137.0 + 0.7) + 0.05 * n);
+         float n = (float)((int)(s >> 8) - 8388608) / 8388608.0f;
+         buf0[i] = 0.4f * base[i % 137] + 0.05f * n;
+         buf1[i] = 0.3f * base[(i + 40) % 137] + 0.05f * n;
       }
       opus_val16 lp[1024];
       pitch_downsample(ch, lp, len, channels);
