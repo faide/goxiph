@@ -286,3 +286,14 @@ func tellFrac(nbitsTotal int, rng uint32) int {
 	l := lg*8 + b
 	return nbitsTotal*8 - int(l)
 }
+
+// SkipTo advances the reported bit position to the given count without consuming any symbols.
+//
+// A CELT frame that signals silence carries nothing after the flag, and the decoder has to account
+// for the rest of the frame as spent so the stages that follow see no budget. RFC 6716 section 4.3
+// describes the effect; the reference reaches it by adjusting the counter directly.
+func (d *Decoder) SkipTo(bits int) {
+	if delta := bits - d.Tell(); delta > 0 {
+		d.nbitsTotal += delta
+	}
+}

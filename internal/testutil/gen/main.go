@@ -159,6 +159,10 @@ func run(out, dur string) error {
 		{"opus_hybrid_fb", "--speech", "16", "20"},
 		{"opus_mixed_modes", "--speech", "64", "20"},
 		{"opus_celt_short", "--music", "96", "2.5"},
+		// Frames of two to twelve bytes, which is where a CELT frame runs out of room for its own
+		// parameters: the trim, the spreading and the time-frequency flags all fall back to defaults
+		// rather than being read. Nothing else in the corpus reaches those branches.
+		{"opus_celt_tiny", "--music", "6", "2.5"},
 		{"opus_celt_long", "--music", "24", "60"},
 	}
 	for _, v := range opusVariants {

@@ -14,6 +14,9 @@ import (
 	"testing"
 
 	"github.com/faide/goxiph/ogg"
+
+	"github.com/faide/goxiph/internal/celt"
+	"github.com/faide/goxiph/internal/rangecoder"
 )
 
 const corpusDir = "../testdata/generated"
@@ -386,4 +389,102 @@ func TestConformanceTOCMatchesReferenceDecoder(t *testing.T) {
 			t.Logf("%d packets agree on mode, bandwidth, channels and frame size", len(recs))
 		})
 	}
+}
+
+// endBandFor maps a bandwidth to the first band a CELT frame does not code, from
+// src/opus_decoder.c.
+func endBandFor(b Bandwidth) int {
+	switch b {
+	case BandwidthNarrow:
+		return 13
+	case BandwidthMedium, BandwidthWide:
+		return 17
+	case BandwidthSuperWide:
+		return 19
+	default:
+		return 21
+	}
+}
+
+// TestConformanceCELTRangeMatchesReferenceDecoder is the gate for everything the CELT decoder reads.
+//
+// The final range is a running function of every symbol decoded, in order. It agrees only if the
+// energy, the time-frequency changes, the spreading, the boosts, the trim, the allocation, the fine
+// energy, every band's shape and the anti-collapse flag were all read exactly as libopus read them.
+// Nothing short of that produces the same number, and a mismatch names the packet where the two
+// first diverged.
+//
+// Only CELT-only packets are checked, because SILK is not written yet.
+func TestConformanceCELTRangeMatchesReferenceDecoder(t *testing.T) {
+	if _, err := exec.LookPath("opusdec"); err != nil {
+		t.Skip("opusdec not installed")
+	}
+
+	var totalChecked, totalSkipped int
+	for _, path := range corpus(t, "*.opus") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			s := readStream(t, path)
+			recs := readRangeDump(t, path)
+			if len(recs) != len(s.packets) {
+				t.Fatalf("opusdec reported %d packets, we parsed %d", len(recs), len(s.packets))
+			}
+
+			var dec *celt.Decoder
+			var checked, skipped int
+
+			for i, p := range s.packets {
+				if p.Mode != ModeCELT {
+					// A decoder that has missed frames cannot carry its state forward.
+					dec = nil
+					skipped++
+					continue
+				}
+
+				channels := 1
+				if p.Stereo {
+					channels = 2
+				}
+				end := endBandFor(p.Bandwidth)
+				if dec == nil {
+					var err error
+					if dec, err = celt.NewDecoder(channels, 0, end); err != nil {
+						t.Fatalf("packet %d: %v", i, err)
+					}
+				}
+
+				frameSamples := p.Samples() / len(p.Frames)
+				size, err := celt.FrameSizeForSamples(frameSamples)
+				if err != nil {
+					dec, skipped = nil, skipped+1
+					continue
+				}
+
+				for _, f := range p.Frames {
+					if len(f) <= 1 {
+						continue
+					}
+					rd := rangecoder.NewDecoder(f)
+					if _, err := dec.DecodeFrame(rd, len(f), size); err != nil {
+						t.Fatalf("packet %d: %v", i, err)
+					}
+				}
+
+				if got := dec.Range(); got != recs[i].finalRange {
+					t.Fatalf("packet %d (%s %s, %d frames of %d): our range is %d, opusdec reports %d",
+						i, recs[i].mode, recs[i].bandwidth, len(p.Frames), frameSamples,
+						got, recs[i].finalRange)
+				}
+				checked++
+			}
+
+			if checked == 0 {
+				t.Skipf("no CELT-only packets (%d skipped)", skipped)
+			}
+			t.Logf("%d CELT packets agree with opusdec on the final range, %d skipped",
+				checked, skipped)
+			totalChecked += checked
+			totalSkipped += skipped
+		})
+	}
+	t.Logf("total: %d packets checked, %d skipped", totalChecked, totalSkipped)
 }

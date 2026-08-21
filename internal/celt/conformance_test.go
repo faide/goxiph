@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -336,4 +337,37 @@ func TestConformanceLogNIsDerivable(t *testing.T) {
 		}
 	}
 	t.Logf("all %d log-widths agree with log2Frac", NumBands)
+}
+
+// TestConformanceBandMeansMatchTheFloatTable checks the mean energies against the reference's own
+// float copy of them.
+//
+// The integers are kept and divided here rather than transcribing 25 floats. That is only safe if
+// the division is the right one, which is what this compares: the reference ships both forms, so
+// they check each other.
+func TestConformanceBandMeansMatchTheFloatTable(t *testing.T) {
+	raw, err := os.ReadFile(referenceSource + "/celt/quant_bands.c")
+	if err != nil {
+		t.Skipf("reference implementation not extracted: %v", err)
+	}
+
+	body := regexp.MustCompile(`(?s)opus_val16 eMeans\[25] = \{(.*?)\};`).FindSubmatch(raw)
+	if body == nil {
+		t.Fatal("could not find the float eMeans table in the reference")
+	}
+	matches := regexp.MustCompile(`[\d.]+f`).FindAll(body[1], -1)
+	if len(matches) != 25 {
+		t.Fatalf("reference holds %d float means, want 25", len(matches))
+	}
+
+	for i, m := range matches {
+		want, err := strconv.ParseFloat(strings.TrimSuffix(string(m), "f"), 32)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", m, err)
+		}
+		if got := float64(float32(eMeansQ6[i]) / 16); got != want {
+			t.Errorf("band %d: %d/16 = %v, reference float is %v", i, eMeansQ6[i], got, want)
+		}
+	}
+	t.Logf("all 25 band means match the reference float table")
 }

@@ -115,7 +115,9 @@ func DecodeBoosts(d *rangecoder.Decoder, offsets *[NumBands]int, start, end int,
 
 		boost := 0
 		loopLogp := dynallocLogp
-		for int(loopLogp)<<BitRes+d.TellFrac() < totalBits+totalBoost && boost < caps[b] {
+		// The budget shrinks as boosts are spent, so the loop closes sooner the more it has given
+		// away. Testing the original budget instead reads past where the encoder stopped writing.
+		for int(loopLogp)<<BitRes+d.TellFrac() < totalBits && boost < caps[b] {
 			if d.DecodeBitLogp(loopLogp) == 0 {
 				break
 			}

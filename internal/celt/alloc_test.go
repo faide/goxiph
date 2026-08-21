@@ -325,3 +325,100 @@ func BenchmarkComputeAllocation(b *testing.B) {
 		ComputeAllocation(d, 0, NumBands, &offsets, &caps, 5, 8000, Frame20ms, 2, false)
 	}
 }
+
+// encodeBoosts mirrors the reference's dynamic allocation loop on the encoding side.
+//
+// Its stopping condition is the point of it: the budget it tests against shrinks as boosts are
+// spent, so a decoder that kept testing the original budget would keep reading where the encoder had
+// stopped writing.
+// It returns the boosts it wrote, which are whole quanta and so may overshoot what was
+// asked for; the decoder has to agree with those rather than with the request.
+func encodeBoosts(e *rangecoder.Encoder, want []int, start, end int,
+	frame FrameSize, caps *[NumBands]int, totalBits int,
+) []int {
+	written := make([]int, NumBands)
+	dynallocLogp := uint32(6)
+	for b := start; b < end; b++ {
+		n := (BandEdges[b+1] - BandEdges[b]) << frame
+		quanta := min(8*n, max(48, n))
+
+		boost := 0
+		loopLogp := dynallocLogp
+		for e.TellFrac()+int(loopLogp)<<BitRes < totalBits && boost < caps[b] {
+			flag := 0
+			if boost < want[b] {
+				flag = 1
+			}
+			e.EncodeBitLogp(flag, loopLogp)
+			if flag == 0 {
+				break
+			}
+			boost += quanta
+			totalBits -= quanta
+			loopLogp = 1
+		}
+		written[b] = boost
+		if boost > 0 && dynallocLogp > 2 {
+			dynallocLogp--
+		}
+	}
+	return written
+}
+
+// TestBoostsRoundTripAgainstTheEncoderLoop is what checks the stopping condition rather than the
+// result.
+//
+// A boost loop that reads too far still terminates and still respects the caps, so the bounds tests
+// pass either way; only running the encoder's own condition against it shows a disagreement. The
+// budgets here are chosen tight enough that the condition binds partway through the frame.
+func TestBoostsRoundTripAgainstTheEncoderLoop(t *testing.T) {
+	bound := 0
+	for _, frame := range []FrameSize{Frame2p5ms, Frame5ms, Frame10ms, Frame20ms} {
+		for _, channels := range []int{1, 2} {
+			caps := Caps(frame, channels)
+
+			for _, scale := range []int{1, 2, 4, 8} {
+				want := make([]int, NumBands)
+				for b := range NumBands {
+					n := (BandEdges[b+1] - BandEdges[b]) << frame
+					quanta := min(8*n, max(48, n))
+					want[b] = quanta * (b % 3) * scale
+					want[b] = min(want[b], caps[b])
+				}
+
+				for _, budget := range []int{200, 400, 800, 1600, 3200, 12800} {
+					enc := rangecoder.NewEncoder(1 << 14)
+					written := encodeBoosts(enc, want, 0, NumBands, frame, &caps, budget)
+					data := enc.Done()
+
+					var got [NumBands]int
+					dec := rangecoder.NewDecoder(data)
+					DecodeBoosts(dec, &got, 0, NumBands, frame, &caps, budget)
+
+					for b := range NumBands {
+						if got[b] != written[b] {
+							t.Fatalf("frame %d channels %d budget %d band %d: decoded a boost of %d, encoder wrote %d",
+								frame, channels, budget, b, got[b], written[b])
+						}
+					}
+					// The two must also stop at the same place, or everything after desynchronises.
+					if dec.TellFrac() != enc.TellFrac() {
+						t.Fatalf("frame %d channels %d budget %d: decoder stopped at %d, encoder at %d",
+							frame, channels, budget, dec.TellFrac(), enc.TellFrac())
+					}
+					// The budget bound the loop where a band stopped short of both the request and
+					// its cap. Without one such case the condition under test never fired.
+					for b := range NumBands {
+						if written[b] < want[b] && written[b] < caps[b] {
+							bound++
+						}
+					}
+				}
+			}
+		}
+	}
+	if bound == 0 {
+		t.Fatal("no budget was tight enough to bind; the stopping condition was never tested")
+	}
+	t.Logf("the budget bound the loop in %d cases", bound)
+}
