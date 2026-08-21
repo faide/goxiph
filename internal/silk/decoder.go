@@ -41,6 +41,32 @@ func NewDecoder(c Config) (*Decoder, error) {
 // Config returns the configuration this decoder was built for.
 func (d *Decoder) Config() Config { return d.config }
 
+// SetRate reconfigures the decoder for a new internal rate.
+//
+// A rate change is not a fresh start. The filters and the resampler are cleared, because their state
+// describes a signal at the old rate and means nothing at the new one; the gain index restarts from
+// a middle value rather than from silence. But what the entropy decoding refers back to — the
+// previous frame's signal type and pitch lag — is kept, because the next frame's symbols are coded
+// against it whatever the rate did.
+func (d *Decoder) SetRate(rateKHz int) {
+	if rateKHz == d.config.SampleRateKHz {
+		return
+	}
+	d.config.SampleRateKHz = rateKHz
+
+	for c := range d.config.Channels {
+		// The entropy state in d.ch[c].frames survives; everything else is rebuilt.
+		d.ch[c].syn = NewSynthesisState(rateKHz, d.config.Subframes())
+		d.ch[c].prevNLSF = nil
+		// From silk/decoder_set_fs.c: the gain index restarts at ten, not at zero.
+		d.ch[c].prevGain = gainIndexAfterRateChange
+		d.resample[c] = NewResampler(rateKHz)
+	}
+}
+
+// gainIndexAfterRateChange is where the gain index restarts when the internal rate changes.
+const gainIndexAfterRateChange = 10
+
 // reset clears everything that carries between frames.
 func (d *Decoder) reset() {
 	for c := range d.config.Channels {

@@ -36,8 +36,13 @@ type PostFilter struct {
 // anti-collapse fill measures against the two before it. Both are held for two channels whatever the
 // stream carries, because a mono frame reads the second slot and the channel count can change.
 type Decoder struct {
-	channels   int
-	start, end int
+	// channels is what the decoder delivers, fixed for the stream; streamChannels is what the
+	// current packet codes, which may be fewer. The two are separate because the synthesis always
+	// runs on the delivered count: a stream that drops to mono keeps both filter chains alive, so
+	// that going back to stereo resumes rather than restarts.
+	channels       int
+	streamChannels int
+	start, end     int
 
 	logE  [2][]float32 // the current frame's band energies, in the log domain
 	prev1 [2][]float32 // the previous frame's
@@ -64,15 +69,18 @@ func NewDecoder(channels, start, end int) (*Decoder, error) {
 		return nil, fmt.Errorf("celt: band range %d to %d", start, end)
 	}
 
+	// The buffers are sized for two channels whatever this stream carries, because the count can
+	// change from one packet to the next and the state has to survive that.
 	d := &Decoder{
-		channels:  channels,
-		start:     start,
-		end:       end,
-		mdct:      NewMDCT(ShortMdctSize << maxLM),
-		decodeMem: make([][]float32, channels),
-		preemph:   make([]float32, channels),
+		channels:       channels,
+		streamChannels: channels,
+		start:          start,
+		end:            end,
+		mdct:           NewMDCT(ShortMdctSize << maxLM),
+		decodeMem:      make([][]float32, 2),
+		preemph:        make([]float32, 2),
 	}
-	for c := range channels {
+	for c := range 2 {
 		d.decodeMem[c] = make([]float32, decodeBufferSize+Overlap)
 	}
 	for c := range 2 {
@@ -85,6 +93,23 @@ func NewDecoder(channels, start, end int) (*Decoder, error) {
 		}
 	}
 	return d, nil
+}
+
+// Configure moves the band range and channel count without disturbing anything else.
+//
+// A stream changes bandwidth, and moves between the transform codec alone and the transform codec
+// atop the linear predictor, without any of it being a fresh start: the band energies, the filter
+// state and the overlap all carry across. Rebuilding the decoder instead would reset the energy
+// prediction, which is heard as a step at every change and shows in no symbol.
+func (d *Decoder) Configure(streamChannels, start, end int) error {
+	if streamChannels != 1 && streamChannels != 2 {
+		return fmt.Errorf("celt: %d coded channels", streamChannels)
+	}
+	if start < 0 || end > NumBands || start >= end {
+		return fmt.Errorf("celt: band range %d to %d", start, end)
+	}
+	d.streamChannels, d.start, d.end = streamChannels, start, end
+	return nil
 }
 
 // Range returns the entropy coder state after the last frame.
@@ -114,9 +139,10 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 	lm := int(frame)
 	m := 1 << uint(lm)
 	n := m * ShortMdctSize
-	c := d.channels
+	c := d.streamChannels
 
-	out := &Frame{Spectrum: make([][]float32, c)}
+	// One spectrum per delivered channel, though only the coded ones are read from the stream.
+	out := &Frame{Spectrum: make([][]float32, d.channels)}
 	for i := range out.Spectrum {
 		out.Spectrum[i] = make([]float32, n)
 	}
@@ -178,7 +204,7 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 	caps := Caps(frame, c)
 	var offsets [NumBands]int
 	totalFrac := totalBits << BitRes
-	totalBoost := DecodeBoosts(dec, &offsets, d.start, d.end, frame, &caps, totalFrac)
+	totalBoost := DecodeBoosts(dec, &offsets, d.start, d.end, frame, c, &caps, totalFrac)
 	trim := DecodeTrim(dec, totalFrac, totalBoost)
 
 	// One bit is held back for the anti-collapse flag, but only where a frame could collapse: that
@@ -221,7 +247,7 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 		alloc.FineBits[:], alloc.FinePriority[:], totalBits-dec.Tell())
 
 	if antiCollapseOn {
-		d.rng = AntiCollapse(out.Spectrum, masks, d.logE[:c], d.prev1[:], d.prev2[:],
+		d.rng = AntiCollapse(out.Spectrum[:c], masks, d.logE[:c], d.prev1[:], d.prev2[:],
 			alloc.Pulses[:], lm, d.start, d.end, d.rng)
 	}
 
@@ -232,6 +258,17 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 			clear(amp)
 		}
 		DenormaliseBands(out.Spectrum[ch], out.Spectrum[ch], amp, d.end, lm)
+	}
+
+	// Reconcile what was coded with what is delivered, before the transform rather than after it.
+	// Both filter chains then run on a signal every frame, so neither goes stale.
+	switch {
+	case d.channels == 2 && c == 1:
+		copy(out.Spectrum[1], out.Spectrum[0])
+	case d.channels == 1 && c == 2:
+		for i := range out.Spectrum[0] {
+			out.Spectrum[0][i] = 0.5 * (out.Spectrum[0][i] + out.Spectrum[1][i])
+		}
 	}
 
 	d.synthesise(out, n, lm, transient, pf)
@@ -256,7 +293,9 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 // A transient frame does not become the new history outright; it only lowers it. Its energies are
 // measured over short blocks and would otherwise make the next frame predict from a peak.
 func (d *Decoder) advanceHistory(transient bool) {
-	if d.channels == 1 {
+	// The coded count, not the delivered one: a mono packet leaves the second channel's energies
+	// standing in for its own, so that a later stereo packet predicts from something.
+	if d.streamChannels == 1 {
 		copy(d.logE[1], d.logE[0])
 	}
 

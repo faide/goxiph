@@ -103,15 +103,16 @@ func Caps(frame FrameSize, channels int) [NumBands]int {
 // about half a bit across all twenty-one bands. Each boost a band receives makes the next one
 // cheaper, which is what lets an encoder concentrate capacity without paying for it repeatedly.
 func DecodeBoosts(d *rangecoder.Decoder, offsets *[NumBands]int, start, end int,
-	frame FrameSize, caps *[NumBands]int, totalBits int,
+	frame FrameSize, channels int, caps *[NumBands]int, totalBits int,
 ) int {
 	dynallocLogp := uint32(6)
 	totalBoost := 0
 
 	for b := start; b < end; b++ {
-		n := (BandEdges[b+1] - BandEdges[b]) << frame
+		// The width counts every coded bin, so a stereo band is twice as wide as its bin count.
+		width := channels * (BandEdges[b+1] - BandEdges[b]) << frame
 		// A boost step is six bits, floored at an eighth of a bit per bin and capped at one.
-		quanta := min(8*n, max(48, n))
+		quanta := min(8*width, max(48, width))
 
 		boost := 0
 		loopLogp := dynallocLogp
@@ -282,7 +283,9 @@ func TrimOffsets(start, end, trim int, frame FrameSize, channels int) [NumBands]
 		n := BandEdges[b+1] - BandEdges[b]
 		offsets[b] = channels * n * (trim - 5 - int(frame)) * (end - b - 1) *
 			(1 << (uint(frame) + BitRes)) >> 6
-		// A one-bin band gains more from the coarse energy than from shape, so it is given less.
+		// A single-coefficient band gains more from the coarse energy than from shape, so it is
+		// given less. The test is on the bin count, not on the coded width: it does not count
+		// channels, though the offset it subtracts does.
 		if n<<frame == 1 {
 			offsets[b] -= channels << BitRes
 		}

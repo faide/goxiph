@@ -19,7 +19,7 @@ func allocate(t *testing.T, data []byte, start, end int, frame FrameSize, channe
 
 	var offsets [NumBands]int
 	totalBits := len(data) * 8 << BitRes
-	boost := DecodeBoosts(d, &offsets, start, end, frame, &caps, totalBits)
+	boost := DecodeBoosts(d, &offsets, start, end, frame, channels, &caps, totalBits)
 	trim := DecodeTrim(d, totalBits, boost)
 
 	return ComputeAllocation(d, start, end, &offsets, &caps, trim, total, frame, channels, false)
@@ -266,7 +266,7 @@ func TestBoostsAreBounded(t *testing.T) {
 		caps := Caps(frame, channels)
 		var offsets [NumBands]int
 		d := rangecoder.NewDecoder(data)
-		boost := DecodeBoosts(d, &offsets, 0, NumBands, frame, &caps, len(data)*8<<BitRes)
+		boost := DecodeBoosts(d, &offsets, 0, NumBands, frame, channels, &caps, len(data)*8<<BitRes)
 
 		if boost < 0 {
 			t.Fatalf("total boost %d", boost)
@@ -295,7 +295,7 @@ func FuzzAllocation(f *testing.F) {
 		var offsets [NumBands]int
 		d := rangecoder.NewDecoder(data)
 		totalBits := len(data) * 8 << BitRes
-		boost := DecodeBoosts(d, &offsets, 0, NumBands, frame, &caps, totalBits)
+		boost := DecodeBoosts(d, &offsets, 0, NumBands, frame, channels, &caps, totalBits)
 		trim := DecodeTrim(d, totalBits, boost)
 		a := ComputeAllocation(d, 0, NumBands, &offsets, &caps, trim, total, frame, channels, false)
 
@@ -334,13 +334,13 @@ func BenchmarkComputeAllocation(b *testing.B) {
 // It returns the boosts it wrote, which are whole quanta and so may overshoot what was
 // asked for; the decoder has to agree with those rather than with the request.
 func encodeBoosts(e *rangecoder.Encoder, want []int, start, end int,
-	frame FrameSize, caps *[NumBands]int, totalBits int,
+	frame FrameSize, channels int, caps *[NumBands]int, totalBits int,
 ) []int {
 	written := make([]int, NumBands)
 	dynallocLogp := uint32(6)
 	for b := start; b < end; b++ {
-		n := (BandEdges[b+1] - BandEdges[b]) << frame
-		quanta := min(8*n, max(48, n))
+		width := channels * (BandEdges[b+1] - BandEdges[b]) << frame
+		quanta := min(8*width, max(48, width))
 
 		boost := 0
 		loopLogp := dynallocLogp
@@ -380,20 +380,20 @@ func TestBoostsRoundTripAgainstTheEncoderLoop(t *testing.T) {
 			for _, scale := range []int{1, 2, 4, 8} {
 				want := make([]int, NumBands)
 				for b := range NumBands {
-					n := (BandEdges[b+1] - BandEdges[b]) << frame
-					quanta := min(8*n, max(48, n))
+					width := channels * (BandEdges[b+1] - BandEdges[b]) << frame
+					quanta := min(8*width, max(48, width))
 					want[b] = quanta * (b % 3) * scale
 					want[b] = min(want[b], caps[b])
 				}
 
 				for _, budget := range []int{200, 400, 800, 1600, 3200, 12800} {
 					enc := rangecoder.NewEncoder(1 << 14)
-					written := encodeBoosts(enc, want, 0, NumBands, frame, &caps, budget)
+					written := encodeBoosts(enc, want, 0, NumBands, frame, channels, &caps, budget)
 					data := enc.Done()
 
 					var got [NumBands]int
 					dec := rangecoder.NewDecoder(data)
-					DecodeBoosts(dec, &got, 0, NumBands, frame, &caps, budget)
+					DecodeBoosts(dec, &got, 0, NumBands, frame, channels, &caps, budget)
 
 					for b := range NumBands {
 						if got[b] != written[b] {

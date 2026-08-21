@@ -63,10 +63,7 @@ func silkRateFor(b Bandwidth) int {
 type Decoder struct {
 	channels int
 
-	celt      *celt.Decoder
-	celtStart int
-	celtEnd   int
-	celtChan  int
+	celt *celt.Decoder
 
 	silk     *silk.Decoder
 	silkRate int
@@ -76,6 +73,9 @@ type Decoder struct {
 	// codec was not running, because it has missed however long the other was in charge.
 	prevMode Mode
 	hasPrev  bool
+	// prevRedundancy records that the previous packet carried a redundant frame going into the
+	// transform codec, which spares the next one a reset.
+	prevRedundancy bool
 
 	// finalRange is the entropy coder's state after the last frame decoded. It is a running
 	// function of every symbol read, so two decoders agree on it only if they read the same
@@ -112,7 +112,7 @@ func (d *Decoder) Decode(packet []byte) ([][]float32, error) {
 	}
 	frameSamples := p.Samples() / len(p.Frames)
 
-	out := make([][]float32, coded)
+	out := make([][]float32, d.channels)
 	for _, frame := range p.Frames {
 		got, err := d.decodeFrame(p, frame, frameSamples, coded)
 		if err != nil {
@@ -123,11 +123,7 @@ func (d *Decoder) Decode(packet []byte) ([][]float32, error) {
 		}
 	}
 
-	// Widen or narrow to the stream's channel count.
-	for len(out) < d.channels {
-		out = append(out, append([]float32(nil), out[0]...))
-	}
-	return out[:d.channels], nil
+	return out, nil
 }
 
 // decodeFrame decodes one frame of a packet with whichever codec its configuration names.
@@ -136,24 +132,27 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		// An empty frame is silence, and neither codec is run for it. The reference reports no
 		// range for such a packet, so neither does this.
 		d.finalRange = 0
-		out := make([][]float32, coded)
+		out := make([][]float32, d.channels)
 		for c := range out {
 			out[c] = make([]float32, samples)
 		}
 		return out, nil
 	}
 
-	// A codec that was not running has missed the intervening signal, and cannot predict across the
-	// gap. Whichever one is resumed here starts again.
+	// A change of mode starts the transform codec again, because it has either missed the
+	// intervening signal or is about to hand it over; a packet whose predecessor carried redundancy
+	// is the exception, since the redundant frame already bridged the gap. The linear predictor
+	// starts again only when coming back from the transform codec alone.
 	if d.hasPrev && d.prevMode != p.Mode {
-		if p.Mode != ModeCELT && d.prevMode == ModeCELT {
-			d.silk = nil
-		}
-		if p.Mode != ModeSILK && d.prevMode == ModeSILK {
+		if !d.prevRedundancy {
 			d.celt = nil
+		}
+		if d.prevMode == ModeCELT {
+			d.silk = nil
 		}
 	}
 	d.prevMode, d.hasPrev = p.Mode, true
+	d.prevRedundancy = false
 
 	switch p.Mode {
 	case ModeCELT:
@@ -167,10 +166,10 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		if err != nil {
 			return nil, err
 		}
-		// A SILK-only packet can carry a redundant transform frame too, and its bytes are not
-		// SILK's. Nothing reads them here, but the flags have to be accounted for.
-		readRedundancy(dec, len(frame), false)
-		d.finalRange = dec.Range()
+		red := readRedundancy(dec, len(frame), false)
+		if err := d.applyRedundancy(p, frame, red, out, coded, dec); err != nil {
+			return nil, err
+		}
 		return out, nil
 	case ModeHybrid:
 		// One range decoder, read in turn: SILK takes the low bands and leaves the coder wherever
@@ -181,12 +180,25 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 		if err != nil {
 			return nil, err
 		}
-		length := readRedundancy(dec, len(frame), true)
-		high, err := d.decodeCELT(p, dec, length, samples, coded, hybridStartBand)
+		red := readRedundancy(dec, len(frame), true)
+
+		// Going into SILK the redundant frame is read first, because the main frame's decode
+		// continues from the state it leaves.
+		var early [][]float32
+		var redRange uint32
+		if red.present && red.celtToSilk {
+			early, redRange, err = d.decodeRedundant(p, frame, red, coded)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		high, err := d.decodeCELT(p, dec, red.length, samples, coded, hybridStartBand)
 		if err != nil {
 			return nil, err
 		}
-		d.finalRange = dec.Range()
+		mainRange := dec.Range()
+
 		// The two cover different bands of the same signal, so the result is their sum.
 		for c := range high {
 			for i := range high[c] {
@@ -195,6 +207,16 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 				}
 			}
 		}
+
+		if red.present && !red.celtToSilk {
+			early, redRange, err = d.decodeRedundant(p, frame, red, coded)
+			if err != nil {
+				return nil, err
+			}
+		}
+		d.blendRedundancy(high, early, red, samples)
+		d.prevRedundancy = red.present && !red.celtToSilk
+		d.finalRange = mainRange ^ redRange
 		return high, nil
 	default:
 		return nil, fmt.Errorf("opus: %s frames are not supported yet", p.Mode)
@@ -203,12 +225,16 @@ func (d *Decoder) decodeFrame(p *Packet, frame []byte, samples, coded int) ([][]
 
 func (d *Decoder) decodeCELT(p *Packet, dec *rangecoder.Decoder, length, samples, coded, start int) ([][]float32, error) {
 	end := endBandFor(p.Bandwidth)
-	if d.celt == nil || d.celtStart != start || d.celtEnd != end || d.celtChan != coded {
-		c, err := celt.NewDecoder(coded, start, end)
+	if d.celt == nil {
+		// Built for what the stream delivers, not for what this packet codes.
+		c, err := celt.NewDecoder(d.channels, start, end)
 		if err != nil {
 			return nil, err
 		}
-		d.celt, d.celtStart, d.celtEnd, d.celtChan = c, start, end, coded
+		d.celt = c
+	}
+	if err := d.celt.Configure(coded, start, end); err != nil {
+		return nil, err
 	}
 
 	size, err := celt.FrameSizeForSamples(samples)
@@ -228,9 +254,11 @@ func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded,
 	}
 	frameMS := samples / (OutputRate / 1000)
 	// A change of packet duration is not a reason to start again: the filters and the resampler
-	// carry across it. Only the internal rate or the channel count forces a new decoder, because
-	// neither can be reinterpreted.
-	if d.silk == nil || d.silkRate != rate || d.silkChan != coded {
+	// carry across it. Nor is a change of rate, quite: that clears the filters but keeps what the
+	// entropy decoding refers back to, which is the decoder's own business. Only a change of
+	// channel count builds a new one.
+	switch {
+	case d.silk == nil || d.silkChan != coded:
 		dec, err := silk.NewDecoder(silk.Config{
 			SampleRateKHz: rate,
 			FrameMS:       frameMS,
@@ -240,6 +268,9 @@ func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded,
 			return nil, err
 		}
 		d.silk, d.silkRate, d.silkChan = dec, rate, coded
+	case d.silkRate != rate:
+		d.silk.SetRate(rate)
+		d.silkRate = rate
 	}
 
 	pcm, err := d.silk.Decode(dec, frameMS)
@@ -247,57 +278,166 @@ func (d *Decoder) decodeSILK(p *Packet, dec *rangecoder.Decoder, samples, coded,
 		return nil, err
 	}
 
-	out := make([][]float32, coded)
+	// Delivered channels, not coded ones. A packet that codes mono in a stereo stream has its
+	// single channel sent to both, which is what keeps the two in step when the stream changes.
+	out := make([][]float32, d.channels)
 	for c := range out {
-		// A mono payload in a stereo packet is not possible: the coded count comes from the same
-		// byte SILK was told about, so every coded channel is present.
-		out[c] = make([]float32, len(pcm[c]))
-		for i, v := range pcm[c] {
+		src := pcm[min(c, len(pcm)-1)]
+		out[c] = make([]float32, len(src))
+		for i, v := range src {
 			out[c][i] = float32(v) / 32768
 		}
 	}
 	return out, nil
 }
 
-// readRedundancy reads the flags that may sit between SILK's symbols and CELT's, and returns how
-// many bytes of the frame remain for CELT.
+// redundancy describes the short frame of the other codec a packet may carry alongside its own.
 //
-// A packet that changes between the two codecs can carry a short redundant frame of the other one,
-// so that the transition is crossfaded rather than cut. The flags are only present where there is
-// room for them, which is why the position is tested before anything is read.
+// A stream that changes codec, bandwidth or frame size puts a five millisecond frame of the outgoing
+// codec at the end of the packet, so that the decoder can cross-fade rather than cut. Its bytes are
+// not the main frame's, and its entropy decoder is separate.
+type redundancy struct {
+	present    bool
+	celtToSilk bool
+	bytes      int
+	// length is what remains of the frame for the main decode.
+	length int
+}
+
+// readRedundancy reads the flags that sit between SILK's symbols and CELT's.
 //
-// The redundant audio itself is not decoded here. Nothing in the corpus signals it, and using it
-// would only smooth a transition; the accounting is what the rest of the packet depends on.
-func readRedundancy(dec *rangecoder.Decoder, length int, hybrid bool) int {
+// They are only present where there is room for them, which is why the position is tested before
+// anything is read. A CELT-only packet never carries them at all.
+func readRedundancy(dec *rangecoder.Decoder, length int, hybrid bool) redundancy {
+	r := redundancy{length: length}
+
 	need := 17
 	if hybrid {
 		need += 20
 	}
 	if dec.Tell()+need > 8*length {
-		return length
+		return r
 	}
 
-	redundant := true
+	// Outside hybrid the flag is implied: there is redundancy whenever there was room to say so.
+	r.present = true
 	if hybrid {
-		redundant = dec.DecodeBitLogp(12) != 0
+		r.present = dec.DecodeBitLogp(12) != 0
 	}
-	if !redundant {
-		return length
+	if !r.present {
+		return r
 	}
 
-	dec.DecodeBitLogp(1) // whether the redundancy carries the transform codec into SILK or out of it
-	var bytes int
+	r.celtToSilk = dec.DecodeBitLogp(1) != 0
 	if hybrid {
-		bytes = int(dec.DecodeUint(256)) + 2
+		r.bytes = int(dec.DecodeUint(256)) + 2
 	} else {
-		bytes = length - (dec.Tell()+7)>>3
+		r.bytes = length - (dec.Tell()+7)>>3
 	}
 
-	if length-bytes < 0 || (length-bytes)*8 < dec.Tell() {
+	if r.bytes < 0 || length-r.bytes < 0 || (length-r.bytes)*8 < dec.Tell() {
 		// Not a shape a valid packet takes; leaving the frame whole is the safe reading.
-		return length
+		return redundancy{length: length}
 	}
-	// The raw bits CELT reads backwards must stop before the redundant frame's bytes.
-	dec.Shrink(bytes)
-	return length - bytes
+	// The raw bits the main frame reads backwards must stop before the redundant frame's bytes.
+	dec.Shrink(r.bytes)
+	r.length = length - r.bytes
+	return r
+}
+
+// redundantSamples is the length of a redundant frame, and fadeSamples half of it: the first half is
+// played outright and the second is faded across.
+const (
+	redundantSamples = 240 // 5 ms at 48 kHz
+	fadeSamples      = 120
+)
+
+// decodeRedundant decodes the short frame carried alongside the main one and returns its samples and
+// its entropy coder state.
+//
+// The decoder it runs on is the same one the main frame uses, at band zero rather than at the hybrid
+// start band. Going into SILK it keeps its state, because the frame it produces continues what came
+// before; coming out of SILK it starts clean, because nothing preceded it.
+func (d *Decoder) decodeRedundant(p *Packet, frame []byte, r redundancy, coded int) ([][]float32, uint32, error) {
+	if r.bytes < 2 {
+		return nil, 0, nil
+	}
+	data := frame[len(frame)-r.bytes:]
+
+	if !r.celtToSilk {
+		d.celt = nil
+	}
+	dec := rangecoder.NewDecoder(data)
+	pcm, err := d.decodeCELT(p, dec, len(data), redundantSamples, coded, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pcm, dec.Range(), nil
+}
+
+// window returns the overlap window the cross-fade shapes itself with, which is the transform
+// codec's own.
+func (d *Decoder) window() []float32 { return celt.Window(celt.Overlap) }
+
+// applyRedundancy decodes and blends the redundant frame of a packet that carries no CELT of its
+// own, and records the entropy state the two together produce.
+func (d *Decoder) applyRedundancy(p *Packet, frame []byte, red redundancy,
+	out [][]float32, coded int, dec *rangecoder.Decoder,
+) error {
+	mainRange := dec.Range()
+	if !red.present {
+		d.finalRange = mainRange
+		return nil
+	}
+
+	early, redRange, err := d.decodeRedundant(p, frame, red, coded)
+	if err != nil {
+		return err
+	}
+	d.blendRedundancy(out, early, red, len(out[0]))
+	d.prevRedundancy = !red.celtToSilk
+
+	// The reference reports the two ranges combined, so that a decoder which skipped the redundant
+	// frame cannot pass for one that read it.
+	d.finalRange = mainRange ^ redRange
+	return nil
+}
+
+// blendRedundancy puts the redundant frame where the transition it covers happens.
+//
+// Coming out of the transform codec it belongs at the start, replacing the first half outright and
+// fading across the second; going into it, at the end, fading the other way.
+func (d *Decoder) blendRedundancy(out, early [][]float32, red redundancy, samples int) {
+	if early == nil || len(out) == 0 || samples < redundantSamples {
+		return
+	}
+	window := d.window()
+
+	if red.celtToSilk {
+		for c := range out {
+			copy(out[c][:fadeSamples], early[c][:fadeSamples])
+		}
+		tail := make([][]float32, len(early))
+		for c := range early {
+			tail[c] = early[c][fadeSamples:]
+		}
+		// The redundant frame fades out as the main one fades in.
+		fadeInto(out, tail, fadeSamples, window)
+		return
+	}
+	tail := make([][]float32, len(early))
+	for c := range early {
+		tail[c] = early[c][fadeSamples:]
+	}
+	fadeInto(out, tail, samples-fadeSamples, window)
+}
+
+// fadeInto mixes to[0:fadeSamples] over out starting at position at.
+func fadeInto(out, to [][]float32, at int, window []float32) {
+	for c := range out {
+		for i := range fadeSamples {
+			w := window[i] * window[i]
+			out[c][at+i] = w*to[c][i] + (1-w)*out[c][at+i]
+		}
+	}
 }
