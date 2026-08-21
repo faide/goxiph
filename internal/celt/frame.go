@@ -44,6 +44,15 @@ type Decoder struct {
 	prev2 [2][]float32 // the one before that
 
 	rng uint32
+
+	mdct *MDCT
+	// decodeMem holds each channel's output history followed by its overlap tail. The history is
+	// what the post-filter reaches back into for the pitch period.
+	decodeMem [][]float32
+	preemph   []float32
+	// pf is the previous frame's post-filter and pfOld the one before it. The transform's output
+	// spans both, so the filter cross-fades across two frames rather than switching at a boundary.
+	pf, pfOld PostFilter
 }
 
 // NewDecoder returns a decoder for the given channel count and band range.
@@ -55,7 +64,17 @@ func NewDecoder(channels, start, end int) (*Decoder, error) {
 		return nil, fmt.Errorf("celt: band range %d to %d", start, end)
 	}
 
-	d := &Decoder{channels: channels, start: start, end: end}
+	d := &Decoder{
+		channels:  channels,
+		start:     start,
+		end:       end,
+		mdct:      NewMDCT(ShortMdctSize << maxLM),
+		decodeMem: make([][]float32, channels),
+		preemph:   make([]float32, channels),
+	}
+	for c := range channels {
+		d.decodeMem[c] = make([]float32, decodeBufferSize+Overlap)
+	}
 	for c := range 2 {
 		d.logE[c] = make([]float32, NumBands)
 		d.prev1[c] = make([]float32, NumBands)
@@ -80,6 +99,8 @@ type Frame struct {
 	Spectrum [][]float32
 	// Transient reports that the frame was coded as short blocks.
 	Transient bool
+	// PCM holds the decoded samples, one slice per channel, in the range minus one to one.
+	PCM [][]float32
 	// PostFilter is the pitch filter the frame asked for, if any.
 	PostFilter PostFilter
 	// Silence reports that the frame carries nothing.
@@ -213,6 +234,8 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 		DenormaliseBands(out.Spectrum[ch], out.Spectrum[ch], amp, d.end, lm)
 	}
 
+	d.synthesise(out, n, lm, transient, pf)
+
 	d.advanceHistory(transient)
 	// The range coder's own state seeds the next frame's noise, and is what a reference decode
 	// reports for comparison.
@@ -256,5 +279,55 @@ func (d *Decoder) advanceHistory(transient bool) {
 			d.prev1[c][i] = silenceEnergy
 			d.prev2[c][i] = silenceEnergy
 		}
+	}
+}
+
+// synthesise turns the frame's spectrum into samples.
+//
+// The transform's output overlaps the previous frame, so it is added into a running history rather
+// than emitted on its own; the post-filter then works on that history, where the pitch period it
+// reaches back for is still available.
+func (d *Decoder) synthesise(out *Frame, n, lm int, transient bool, pf PostFilter) {
+	out.PCM = make([][]float32, d.channels)
+	block := make([]float32, n+Overlap)
+
+	for c := range d.channels {
+		mem := d.decodeMem[c]
+		// Make room at the end of the history for this frame.
+		copy(mem[:decodeBufferSize-n], mem[n:decodeBufferSize])
+
+		d.mdct.InverseFrame(out.Spectrum[c], block, lm, transient, maxLM)
+
+		// The leading overlap completes the previous frame's tail; the trailing one waits for the next.
+		syn := decodeBufferSize - n
+		overlapMem := mem[decodeBufferSize:]
+		for j := range Overlap {
+			mem[syn+j] = block[j] + overlapMem[j]
+		}
+		copy(mem[syn+Overlap:decodeBufferSize], block[Overlap:n])
+		copy(overlapMem, block[n:n+Overlap])
+
+		// The filter needs a period it can reach back for, whatever was signalled.
+		periodOld := max(d.pfOld.Pitch, combMinPeriod)
+		period := max(d.pf.Pitch, combMinPeriod)
+		window := d.mdct.Window()
+
+		combFilter(mem, syn, periodOld, period, ShortMdctSize,
+			d.pfOld.Gain, d.pf.Gain, d.pfOld.Tapset, d.pf.Tapset, window, Overlap)
+		if lm != 0 {
+			combFilter(mem, syn+ShortMdctSize, period, max(pf.Pitch, combMinPeriod),
+				n-ShortMdctSize, d.pf.Gain, pf.Gain, d.pf.Tapset, pf.Tapset, window, Overlap)
+		}
+
+		out.PCM[c] = make([]float32, n)
+		deemphasis(out.PCM[c], mem, syn, n, &d.preemph[c])
+	}
+
+	// A frame longer than one short block has already cross-faded to the new filter above, so both
+	// slots move on together; a shortest frame has not, and keeps one frame of lag.
+	d.pfOld = d.pf
+	d.pf = pf
+	if lm != 0 {
+		d.pfOld = pf
 	}
 }

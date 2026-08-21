@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,13 @@ func main() {
 }
 
 func run(out, dur string) error {
+	// Start from an empty directory. The generator only ever writes, so a fixture it no longer
+	// produces would otherwise sit in the corpus and be tested as though it were current: the tests
+	// glob the directory rather than name files. Everything here is generated and untracked, so
+	// there is nothing to lose by clearing it.
+	if err := os.RemoveAll(out); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
@@ -164,6 +172,15 @@ func run(out, dur string) error {
 		// rather than being read. Nothing else in the corpus reaches those branches.
 		{"opus_celt_tiny", "--music", "6", "2.5"},
 		{"opus_celt_long", "--music", "24", "60"},
+		// The four CELT frame sizes are separate code paths through the transform, the reshaping and
+		// the allocation. Without these two the corpus only ever decodes the shortest and longest.
+		{"opus_celt_5ms", "--music", "96", "5"},
+		{"opus_celt_10ms", "--music", "96", "10"},
+		// A narrower bandwidth stops the band loop early, which changes both the allocation and what
+		// the folding has to draw on. These two rates were measured to select CELT at those widths;
+		// opusenc has no switch for it, so the rate is the only handle.
+		{"opus_celt_wb", "--music", "10", "20"},
+		{"opus_celt_swb", "--music", "11", "20"},
 	}
 	for _, v := range opusVariants {
 		if err := tool("opusenc", "--quiet", v.tuning, "--bitrate", v.bitrate,
@@ -172,6 +189,28 @@ func run(out, dur string) error {
 		}
 		count++
 	}
+	// A click train, which is what makes an encoder choose short blocks. Every other Opus fixture is
+	// a steady tone and produces almost none, leaving the interleaved transform, the time-frequency
+	// reshaping and the anti-collapse fill barely exercised.
+	clicks := filepath.Join(out, "clicks_48000hz_1ch.wav")
+	if err := writeWAV(clicks, 48000, 1, func(frame, _ int) int16 {
+		// A sharp attack every 80 ms, decaying over about 6 ms.
+		phase := frame % 3840
+		env := 0.0
+		if phase < 2000 {
+			env = math.Exp(-float64(phase) / 300)
+		}
+		return int16(28000 * env * math.Sin(2*math.Pi*900*float64(frame)/48000))
+	}); err != nil {
+		return err
+	}
+	count++
+	if err := tool("opusenc", "--quiet", "--music", "--bitrate", "96", "--framesize", "20",
+		clicks, filepath.Join(out, "opus_celt_transient.opus")); err != nil {
+		return err
+	}
+	count++
+
 	// A stereo stream, so the channel count is not always one.
 	if err := tool("opusenc", "--quiet", "--bitrate", "128", src,
 		filepath.Join(out, "opus_stereo.opus")); err != nil {

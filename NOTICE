@@ -28,6 +28,15 @@ in RFC 6716:
               the stereo merge and the band loop, from celt/bands.c
   tf.go       the time-frequency resolution decoding and its selection
               table, from celt/celt.c
+  denorm.go   the band mean energies, denormalisation and anti-collapse,
+              from celt/bands.c and celt/quant_bands.c
+  mdct.go     the inverse transform and its window, from celt/mdct.c and
+              celt/modes.c
+  synthesis.go  the post-filter and de-emphasis, from celt/celt.c
+  frame.go    the frame parameter ordering, from celt/celt.c
+
+  internal/celt/testdata/gen_mdct.c links against the reference itself to
+  generate the vectors the inverse transform is checked against.
 
   internal/celt/testdata/gen_bitexact.c reproduces four of those functions
   from the same source, to generate the vectors they are checked against.

@@ -17,6 +17,8 @@ import (
 
 	"github.com/faide/goxiph/internal/celt"
 	"github.com/faide/goxiph/internal/rangecoder"
+	"github.com/faide/goxiph/wav"
+	"math"
 )
 
 const corpusDir = "../testdata/generated"
@@ -487,4 +489,165 @@ func TestConformanceCELTRangeMatchesReferenceDecoder(t *testing.T) {
 		})
 	}
 	t.Logf("total: %d packets checked, %d skipped", totalChecked, totalSkipped)
+}
+
+// decodeCELTStream decodes every CELT-only packet of a stream, returning one slice per channel.
+//
+// It returns nil where the stream holds anything else, because a decoder that has skipped frames
+// carries the wrong history into the ones that follow and its output would not line up.
+func decodeCELTStream(t *testing.T, s stream) [][]float32 {
+	t.Helper()
+
+	var pcm [][]float32
+	var dec *celt.Decoder
+
+	for _, p := range s.packets {
+		if p.Mode != ModeCELT {
+			return nil
+		}
+		channels := 1
+		if p.Stereo {
+			channels = 2
+		}
+		if dec == nil {
+			var err error
+			if dec, err = celt.NewDecoder(channels, 0, endBandFor(p.Bandwidth)); err != nil {
+				t.Fatalf("new decoder: %v", err)
+			}
+			pcm = make([][]float32, channels)
+		}
+		size, err := celt.FrameSizeForSamples(p.Samples() / len(p.Frames))
+		if err != nil {
+			return nil
+		}
+		for _, f := range p.Frames {
+			if len(f) <= 1 {
+				return nil
+			}
+			frame, err := dec.DecodeFrame(rangecoder.NewDecoder(f), len(f), size)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			for c := range frame.PCM {
+				pcm[c] = append(pcm[c], frame.PCM[c]...)
+			}
+		}
+	}
+	return pcm
+}
+
+// readWAVFloat reads a whole WAVE file as planar float samples.
+func readWAVFloat(t *testing.T, path string) ([][]float32, int) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	d, err := wav.NewDecoder(f)
+	if err != nil {
+		t.Fatalf("wav: %v", err)
+	}
+	format := d.Format()
+
+	out := make([][]float32, format.Channels)
+	buf := make([][]float32, format.Channels)
+	for c := range buf {
+		buf[c] = make([]float32, 4096)
+	}
+	for {
+		n, err := d.ReadFloat32(buf)
+		for c := range out {
+			out[c] = append(out[c], buf[c][:n]...)
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	return out, format.SampleRate
+}
+
+// TestConformanceCELTPCMMatchesReferenceDecoder compares our samples against libopus's.
+//
+// The range gate says every symbol was read alike, but says nothing about the transform: an inverse
+// MDCT with the window at the wrong offset consumes exactly the same bits and produces a waveform
+// that is wrong. This closes that, and with it the whole CELT path from bitstream to samples.
+//
+// The reference is asked for 48 kHz output, because at any other rate it resamples and the
+// comparison would be measuring the resampler.
+func TestConformanceCELTPCMMatchesReferenceDecoder(t *testing.T) {
+	if _, err := exec.LookPath("opusdec"); err != nil {
+		t.Skip("opusdec not installed")
+	}
+
+	files := 0
+	for _, path := range corpus(t, "*.opus") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			s := readStream(t, path)
+			ours := decodeCELTStream(t, s)
+			if ours == nil {
+				t.Skip("not a CELT-only stream")
+			}
+
+			out := filepath.Join(t.TempDir(), "ref.wav")
+			cmd := exec.Command("opusdec", "--quiet", "--float", "--rate", "48000", path, out)
+			if msg, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("opusdec: %v\n%s", err, msg)
+			}
+			ref, rate := readWAVFloat(t, out)
+
+			if rate != 48000 {
+				t.Fatalf("reference came back at %d Hz", rate)
+			}
+			// A stream may code fewer channels than its header declares, in which case libopus
+			// duplicates. That mapping belongs to the Opus layer rather than to CELT, so only the
+			// channels CELT produced are compared here.
+			if len(ref) < len(ours) {
+				t.Fatalf("opusdec produced %d channels, we produced %d", len(ref), len(ours))
+			}
+			if len(ref) != len(ours) {
+				t.Logf("the header declares %d channels and the packets code %d; comparing the coded ones",
+					len(ref), len(ours))
+			}
+
+			// The reference has already dropped the pre-skip; ours has not.
+			skip := s.head.PreSkip
+			if len(ours[0])-skip < len(ref[0]) {
+				t.Fatalf("we produced %d samples after a pre-skip of %d, short of the reference's %d",
+					len(ours[0]), skip, len(ref[0]))
+			}
+
+			for c := range ours {
+				var dot, ea, eb, worst float64
+				for i := range ref[c] {
+					a := float64(ours[c][skip+i])
+					b := float64(ref[c][i])
+					dot += a * b
+					ea += a * a
+					eb += b * b
+					worst = math.Max(worst, math.Abs(a-b))
+				}
+				if eb == 0 {
+					t.Fatalf("channel %d of the reference is silent; nothing to compare", c)
+				}
+
+				// A correlation this tight leaves no room for a misplaced window or a wrong overlap;
+				// what remains is the reference working in single precision where we work in double.
+				if corr := dot / math.Sqrt(ea*eb); corr < 0.99999 {
+					t.Fatalf("channel %d: correlation %.7f against the reference", c, corr)
+				}
+				if worst > 1e-4 {
+					t.Fatalf("channel %d: worst sample differs by %v", c, worst)
+				}
+				t.Logf("channel %d: %d samples, worst difference %.2e", c, len(ref[c]), worst)
+			}
+			files++
+		})
+	}
+	if files == 0 {
+		t.Fatal("no CELT-only stream was compared")
+	}
+	t.Logf("%d streams match the reference decoder sample for sample", files)
 }
