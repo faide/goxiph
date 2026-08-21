@@ -82,6 +82,11 @@ var tables = []table{
 	// Line spectral to filter conversion.
 	{"silk_LSFCosTab_FIX_Q12", "lsfCosTable", "a cosine sampled at 128 points, for turning frequencies into filter roots"},
 
+	// Resampling to the Opus output rate.
+	{"silk_resampler_up2_hq_0", "resamplerUp2Even", "allpass coefficients for the even output of the doubling stage"},
+	{"silk_resampler_up2_hq_1", "resamplerUp2Odd", "and for the odd output"},
+	{"silk_resampler_frac_FIR_12", "resamplerFracFIR", "a half-symmetric interpolation filter at twelve fractional offsets"},
+
 	// Stereo.
 	{"silk_stereo_pred_quant_Q13", "stereoPredictionLevels", ""},
 	{"silk_stereo_pred_joint_iCDF", "stereoPredictionJointICDF", ""},
@@ -117,7 +122,6 @@ var goType = map[string]string{
 var (
 	declRe   = regexp.MustCompile(`(?s)const\s+(opus_u?int\d+)\s+(\w+)\s*((?:\[[^\]]*\]\s*)+)=\s*\{(.*?)\};`)
 	dimRe    = regexp.MustCompile(`\[([^\]]*)\]`)
-	numRe    = regexp.MustCompile(`-?\d+`)
 	defineRe = regexp.MustCompile(`(?m)^#define\s+(\w+)\s+\(?\s*(-?\d+)\s*\)?\s*$`)
 )
 
@@ -196,7 +200,10 @@ func run(src, out string) error {
 			}
 			dims = append(dims, n)
 		}
-		values := numRe.FindAllString(parts[2], -1)
+		values, err := elements(parts[2], consts)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.ref, err)
+		}
 
 		total := 1
 		for _, d := range dims {
@@ -344,6 +351,29 @@ func balanced(s string) bool {
 		}
 	}
 	return depth == 0
+}
+
+// elements splits an initialiser into its values, evaluating each.
+//
+// An entry may be an expression rather than a literal: the reference writes some coefficients as a
+// subtraction so that the intent stays visible. Splitting on digits alone would read one such entry
+// as two.
+func elements(body string, consts map[string]int) ([]string, error) {
+	body = strings.NewReplacer("{", "", "}", "").Replace(body)
+
+	var out []string
+	for _, field := range strings.Split(body, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		v, err := resolve(field, consts)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, strconv.Itoa(v))
+	}
+	return out, nil
 }
 
 func stripComments(s string) string {

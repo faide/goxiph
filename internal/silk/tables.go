@@ -361,6 +361,35 @@ var lsfCosTable = [129]int16{
 	-8192,
 }
 
+// resamplerUp2Even is allpass coefficients for the even output of the doubling stage.
+// Transcribed from silk_resampler_up2_hq_0 of the reference implementation.
+var resamplerUp2Even = [3]int16{
+	1746, 14986, -26453,
+}
+
+// resamplerUp2Odd is and for the odd output.
+// Transcribed from silk_resampler_up2_hq_1 of the reference implementation.
+var resamplerUp2Odd = [3]int16{
+	6854, 25769, -9994,
+}
+
+// resamplerFracFIR is a half-symmetric interpolation filter at twelve fractional offsets.
+// Transcribed from silk_resampler_frac_FIR_12 of the reference implementation.
+var resamplerFracFIR = [12][4]int16{
+	{189, -600, 617, 30567},
+	{117, -159, -1070, 29704},
+	{52, 221, -2392, 28276},
+	{-4, 529, -3350, 26341},
+	{-48, 758, -3956, 23973},
+	{-80, 905, -4235, 21254},
+	{-99, 972, -4222, 18278},
+	{-107, 967, -3957, 15143},
+	{-103, 896, -3487, 11950},
+	{-91, 773, -2865, 8798},
+	{-71, 611, -2143, 5784},
+	{-46, 425, -1375, 2996},
+}
+
 // Transcribed from silk_stereo_pred_quant_Q13 of the reference implementation.
 var stereoPredictionLevels = [16]int16{
 	-13732, -10050, -8266, -7526, -6500, -5000, -2950, -820, 820, 2950, 5000, 6500, 7526, 8266, 10050, 13732,

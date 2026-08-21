@@ -103,3 +103,91 @@ func TestSynthesisMatchesReference(t *testing.T) {
 	t.Logf("%d frames, %d samples match the reference; %d voiced, %d interpolated",
 		frames, samples, voiced, interpolated)
 }
+
+// TestResamplerMatchesReference checks the step from the internal rate up to the one Opus delivers.
+//
+// The resampler carries state across frames in both of its stages, and it holds back part of each
+// frame so that SILK's output lines up with CELT's. Getting either wrong shifts the whole stream
+// rather than distorting it, which is the kind of fault that sounds fine on its own and only shows
+// when the two codecs have to meet.
+func TestResamplerMatchesReference(t *testing.T) {
+	cases := readVectors(t)
+	frames, samples := 0, 0
+	rates := map[int]int{}
+
+	for i, c := range cases {
+		dec := rangecoder.NewDecoder(c.payload)
+		h, err := DecodeHeader(dec, c.config)
+		if err != nil || h.LBRR[0] || h.LBRR[1] {
+			continue
+		}
+
+		var st frameState
+		var prevGain int32
+		var prevNLSF []int16
+		cb := codebookFor(c.config.SampleRateKHz)
+		syn := NewSynthesisState(c.config.SampleRateKHz, c.config.Subframes())
+		rs := NewResampler(c.config.SampleRateKHz)
+		subframes := c.config.Subframes()
+
+		for _, want := range c.frames {
+			mode := CodeIndependently
+			if want.index > 0 {
+				mode = CodeConditionally
+			}
+			ix := DecodeIndices(dec, c.config, &st, mode, h.VAD[want.channel][want.index], false)
+			pulses := DecodePulses(dec, ix.SignalType, ix.QuantOffsetType, c.config.FrameLength())
+
+			var p Params
+			p.GainsQ16 = DequantiseGains(ix.GainIndices[:], &prevGain, mode == CodeConditionally, subframes)
+			nlsf := DecodeNLSF(ix.NLSFIndices[:cb.order+1], cb)
+			p.LPCQ12[1] = NLSFToLPC(nlsf, cb.order)
+			p.LPCQ12[0] = p.LPCQ12[1]
+			if ix.NLSFInterpolation < 4 && prevNLSF != nil {
+				mid := make([]int16, cb.order)
+				for k := range cb.order {
+					mid[k] = prevNLSF[k] + int16(int32(ix.NLSFInterpolation)*int32(nlsf[k]-prevNLSF[k])>>2)
+				}
+				p.LPCQ12[0] = NLSFToLPC(mid, cb.order)
+			} else {
+				ix.NLSFInterpolation = 4
+			}
+			prevNLSF = nlsf
+
+			lags := make([]int, subframes)
+			taps := make([]int16, ltpOrder*subframes)
+			var scale int16
+			if ix.SignalType == TypeVoiced {
+				lags = DecodePitchLags(ix.LagIndex, ix.ContourIndex, c.config.SampleRateKHz, subframes)
+				taps = DecodeLTPCoefficients(ix.Periodicity, ix.LTPIndices[:], subframes)
+				scale = LTPScale(ix.LTPScaleIndex)
+			}
+
+			pcm := syn.Synthesise(ix, p, lags, taps, scale, pulses, subframes)
+			got := rs.Resample(pcm)
+
+			if len(got) != len(want.resampled) {
+				t.Fatalf("case %d frame %d: %d resampled samples, reference has %d",
+					i, want.index, len(got), len(want.resampled))
+			}
+			for k := range got {
+				if int(got[k]) != want.resampled[k] {
+					t.Fatalf("case %d frame %d sample %d: resampled %d, reference has %d",
+						i, want.index, k, got[k], want.resampled[k])
+				}
+			}
+			rates[c.config.SampleRateKHz]++
+			frames++
+			samples += len(got)
+		}
+	}
+
+	if frames == 0 {
+		t.Fatal("no frames were resampled")
+	}
+	if len(rates) < 2 {
+		t.Errorf("only one input rate was resampled: %v", rates)
+	}
+	t.Logf("%d frames, %d samples at 48 kHz match the reference; input rates %v",
+		frames, samples, rates)
+}

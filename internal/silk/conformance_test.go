@@ -67,7 +67,7 @@ func TestConformanceTablesMatchReference(t *testing.T) {
 			continue
 		}
 
-		want := numRe.FindAllString(m[1], -1)
+		want := referenceValues(t, m[1])
 		got := numRe.FindAllString(body, -1)
 		if len(got) != len(want) {
 			t.Errorf("%s: generated %d values, reference has %d", name, len(got), len(want))
@@ -95,4 +95,39 @@ func TestConformanceTablesMatchReference(t *testing.T) {
 func stripComments(s string) string {
 	s = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(s, "")
 	return regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(s, "")
+}
+
+// referenceValues splits a reference initialiser into its values.
+//
+// An entry may be written as a subtraction rather than as a literal, which a scan for digits would
+// read as two values. This evaluates them with its own arithmetic rather than sharing the
+// generator's: a test that reused the generator's parsing would agree with it whether or not either
+// was right.
+func referenceValues(t *testing.T, body string) []string {
+	t.Helper()
+
+	body = strings.NewReplacer("{", "", "}", "", "\n", " ").Replace(body)
+	var out []string
+
+	for _, field := range strings.Split(body, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		terms := regexp.MustCompile(`([+-]?\s*\d+)`).FindAllString(field, -1)
+		total := 0
+		for i, term := range terms {
+			v, err := strconv.Atoi(strings.ReplaceAll(strings.TrimSpace(term), " ", ""))
+			if err != nil {
+				t.Fatalf("parsing %q in %q: %v", term, field, err)
+			}
+			if i == 0 {
+				total = v
+			} else {
+				total += v
+			}
+		}
+		out = append(out, strconv.Itoa(total))
+	}
+	return out
 }

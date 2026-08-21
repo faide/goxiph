@@ -54,8 +54,9 @@ type refFrame struct {
 	ltpCoefQ14  []int
 	ltpScaleQ14 int
 
-	// samples is the synthesised output the reference produced.
-	samples []int
+	// samples is the synthesised output the reference produced, and resampled the same at 48 kHz.
+	samples   []int
+	resampled []int
 }
 
 // readVectors parses the reference dump.
@@ -164,6 +165,11 @@ func readVectors(t *testing.T) []vectorCase {
 			f := &cur.frames[len(cur.frames)-1]
 			for i := 4; i < len(fields); i++ {
 				f.samples = append(f.samples, atoi(i))
+			}
+		case "resampled":
+			f := &cur.frames[len(cur.frames)-1]
+			for i := 4; i < len(fields); i++ {
+				f.resampled = append(f.resampled, atoi(i))
 			}
 		case "pitch":
 			f := &cur.frames[len(cur.frames)-1]

@@ -167,6 +167,14 @@ int main(int argc, char **argv)
          for (int k = 0; k < st[n].frame_length; k++) printf(" %d", (int)xq[k]);
          printf("\n");
 
+         /* Resampled to the rate Opus delivers, which is the last thing SILK does. */
+         opus_int16 rs[MAX_FRAME_LENGTH * 6];
+         silk_resampler(&st[n].resampler_state, rs, xq, st[n].frame_length);
+         int rsLen = st[n].frame_length * 48 / fs_kHz;
+         printf("resampled %d %d %d", i, n, rsLen);
+         for (int k = 0; k < rsLen; k++) printf(" %d", (int)rs[k]);
+         printf("\n");
+
          int mv_len = st[n].ltp_mem_length - st[n].frame_length;
          memmove(st[n].outBuf, &st[n].outBuf[st[n].frame_length], mv_len * sizeof(opus_int16));
          memcpy(&st[n].outBuf[mv_len], xq, st[n].frame_length * sizeof(opus_int16));
