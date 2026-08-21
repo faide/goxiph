@@ -36,7 +36,11 @@ func corpus(t *testing.T, glob string) []string {
 }
 
 // stream holds everything read from one Ogg Opus file.
+// rawPackets keeps the undecoded bytes alongside the parsed packets, so the whole-stream test can
+// feed the packet decoder what an application would give it.
 type stream struct {
+	raw [][]byte
+
 	head    Head
 	packets []*Packet
 	samples int64
@@ -88,6 +92,7 @@ func readStream(t *testing.T, path string) stream {
 				t.Fatalf("ParsePacket at packet %d: %v", len(s.packets), err)
 			}
 			s.packets = append(s.packets, pkt)
+			s.raw = append(s.raw, append([]byte(nil), p.Data...))
 			s.samples += int64(pkt.Samples())
 			if p.GranulePos != ogg.NoGranule {
 				s.lastGP = p.GranulePos
@@ -393,21 +398,6 @@ func TestConformanceTOCMatchesReferenceDecoder(t *testing.T) {
 	}
 }
 
-// endBandFor maps a bandwidth to the first band a CELT frame does not code, from
-// src/opus_decoder.c.
-func endBandFor(b Bandwidth) int {
-	switch b {
-	case BandwidthNarrow:
-		return 13
-	case BandwidthMedium, BandwidthWide:
-		return 17
-	case BandwidthSuperWide:
-		return 19
-	default:
-		return 21
-	}
-}
-
 // TestConformanceCELTRangeMatchesReferenceDecoder is the gate for everything the CELT decoder reads.
 //
 // The final range is a running function of every symbol decoded, in order. It agrees only if the
@@ -650,4 +640,106 @@ func TestConformanceCELTPCMMatchesReferenceDecoder(t *testing.T) {
 		t.Fatal("no CELT-only stream was compared")
 	}
 	t.Logf("%d streams match the reference decoder sample for sample", files)
+}
+
+// TestConformanceDecoderMatchesReference decodes whole streams through the packet decoder and
+// compares them with libopus.
+//
+// The per-codec gates check each codec in isolation, on frames handed to it directly. This checks
+// the layer above: that packets are dispatched to the right codec, that a decoder's state survives
+// from one packet to the next, and that the sample counts line up. A stream is skipped only where it
+// holds a mode that is not written yet.
+func TestConformanceDecoderMatchesReference(t *testing.T) {
+	if _, err := exec.LookPath("opusdec"); err != nil {
+		t.Skip("opusdec not installed")
+	}
+
+	checked := map[string]int{}
+	for _, path := range corpus(t, "*.opus") {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			s := readStream(t, path)
+
+			supported := true
+			for _, p := range s.packets {
+				if p.Mode == ModeHybrid || (p.Mode == ModeSILK && p.Stereo) {
+					supported = false
+					break
+				}
+			}
+			if !supported {
+				t.Skip("stream holds a mode that is not written yet")
+			}
+
+			dec, err := NewDecoder(s.head.Channels)
+			if err != nil {
+				t.Fatalf("new decoder: %v", err)
+			}
+
+			var ours [][]float32
+			for i := range s.packets {
+				got, err := dec.Decode(s.raw[i])
+				if err != nil {
+					t.Fatalf("packet %d: %v", i, err)
+				}
+				if ours == nil {
+					ours = make([][]float32, len(got))
+				}
+				for c := range got {
+					ours[c] = append(ours[c], got[c]...)
+				}
+			}
+
+			out := filepath.Join(t.TempDir(), "ref.wav")
+			cmd := exec.Command("opusdec", "--quiet", "--float", "--rate", "48000", path, out)
+			if msg, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("opusdec: %v\n%s", err, msg)
+			}
+			ref, rate := readWAVFloat(t, out)
+			if rate != 48000 {
+				t.Fatalf("reference came back at %d Hz", rate)
+			}
+			if len(ref) != len(ours) {
+				t.Fatalf("opusdec produced %d channels, we produced %d", len(ref), len(ours))
+			}
+
+			skip := s.head.PreSkip
+			if len(ours[0])-skip < len(ref[0]) {
+				t.Fatalf("we produced %d samples after a pre-skip of %d, short of %d",
+					len(ours[0]), skip, len(ref[0]))
+			}
+
+			for c := range ref {
+				var dot, ea, eb, worst float64
+				for i := range ref[c] {
+					a := float64(ours[c][skip+i])
+					b := float64(ref[c][i])
+					dot += a * b
+					ea += a * a
+					eb += b * b
+					worst = math.Max(worst, math.Abs(a-b))
+				}
+				if eb == 0 {
+					t.Fatalf("channel %d of the reference is silent", c)
+				}
+				if corr := dot / math.Sqrt(ea*eb); corr < 0.99999 {
+					t.Fatalf("channel %d: correlation %.7f", c, corr)
+				}
+				if worst > 1e-4 {
+					t.Fatalf("channel %d: worst sample differs by %v", c, worst)
+				}
+			}
+
+			mode := "CELT"
+			if s.packets[0].Mode == ModeSILK {
+				mode = "SILK"
+			}
+			checked[mode]++
+			t.Logf("%d packets, %d samples match the reference", len(s.packets), len(ref[0]))
+		})
+	}
+
+	if checked["SILK"] == 0 {
+		t.Error("no SILK stream was decoded through the packet decoder")
+	}
+	t.Logf("streams matching by leading mode: %v", checked)
 }
