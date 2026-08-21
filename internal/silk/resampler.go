@@ -51,6 +51,14 @@ func NewResampler(rateKHz int) *Resampler {
 	return r
 }
 
+// clone returns an independent copy, which is what a channel appearing mid-stream starts from: it
+// continues the other channel's phase rather than beginning from silence.
+func (r *Resampler) clone() *Resampler {
+	c := *r
+	c.delayBuffer = append([]int16(nil), r.delayBuffer...)
+	return &c
+}
+
 // upsample2x doubles the rate through two allpass chains, one per output phase.
 //
 // An allpass filter passes every frequency at full amplitude and only shifts phase, so running two

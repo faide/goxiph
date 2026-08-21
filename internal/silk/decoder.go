@@ -17,7 +17,11 @@ type Decoder struct {
 	// prevMidOnly says the previous frame coded no side channel, which is what makes the next one
 	// that does start from a cleared side decoder.
 	prevMidOnly bool
-	resample    [2]*Resampler
+	// collapsing says the stream has just dropped to one coded channel. The packet that does so
+	// still delivers two, the second of them the first run through the side channel's resampler, so
+	// that what the side was playing decays rather than stopping.
+	collapsing bool
+	resample   [2]*Resampler
 }
 
 // channelState is everything one coded channel carries between frames.
@@ -78,6 +82,7 @@ func (d *Decoder) SetRate(rateKHz int) {
 		return
 	}
 	d.config.SampleRateKHz = rateKHz
+	d.collapsing = false
 
 	for c := range d.config.Channels {
 		// The entropy state in d.ch[c].frames survives; everything else is rebuilt.
@@ -88,6 +93,29 @@ func (d *Decoder) SetRate(rateKHz int) {
 		d.ch[c].prevGain = gainIndexAfterRateChange
 		d.resample[c] = NewResampler(rateKHz)
 	}
+}
+
+// SetChannels moves the decoder between one coded channel and two.
+//
+// It is not a fresh start either way. Gaining a channel gives the new one nothing to predict from
+// and clears the stereo prediction, but the channel that was already running keeps everything;
+// losing one keeps both, because the stream may gain it back.
+func (d *Decoder) SetChannels(channels int) {
+	if channels == d.config.Channels {
+		return
+	}
+	was := d.config.Channels
+	d.config.Channels = channels
+
+	if channels == 2 && was == 1 {
+		d.ch[1] = newChannelState(d.config.SampleRateKHz, d.config.Subframes())
+		d.ch[1].prevGain = gainIndexAfterRateChange
+		d.stereo.DropSide()
+		// The new channel's resampler continues the old one's phase rather than starting cold.
+		d.resample[1] = d.resample[0].clone()
+		return
+	}
+	d.collapsing = true
 }
 
 // gainIndexAfterRateChange is where the gain index restarts when the internal rate changes.
@@ -144,7 +172,15 @@ func (d *Decoder) Decode(dec *rangecoder.Decoder, frameMS int) ([][]int16, error
 	// the path is written from the reference and unverified against it.
 	d.skipRedundant(dec, header, frames, subframes, stereo)
 
+	// A packet that drops to one coded channel still delivers two, so that the side channel can be
+	// let go of rather than cut. Only its first frame does; after that the two are the same.
+	collapsing := d.collapsing
+	d.collapsing = false
+
 	out := make([][]int16, d.config.Channels)
+	if collapsing {
+		out = make([][]int16, 2)
+	}
 	for i := range frames {
 		// The prediction and the side-channel flag come before either channel's frame.
 		pred := d.stereo.PrevPrediction()
@@ -184,9 +220,17 @@ func (d *Decoder) Decode(dec *rangecoder.Decoder, frameMS int) ([][]int16, error
 
 		// One sample in, not at the frame's start: the buffer's first entries are the previous
 		// frame's tail, and reading from the second is what delays the output by a sample.
-		out[0] = append(out[0], d.resample[0].Resample(mid[1:length+1])...)
-		if stereo {
+		played := d.resample[0].Resample(mid[1 : length+1])
+		out[0] = append(out[0], played...)
+		switch {
+		case stereo:
 			out[1] = append(out[1], d.resample[1].Resample(side[1:length+1])...)
+		case collapsing && i == 0:
+			// The same samples through the side channel's resampler, whose state still holds what
+			// the side was playing. That is what lets it decay instead of stopping.
+			out[1] = append(out[1], d.resample[1].Resample(mid[1:length+1])...)
+		case collapsing:
+			out[1] = append(out[1], played...)
 		}
 	}
 	return out, nil

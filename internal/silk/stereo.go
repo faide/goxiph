@@ -107,6 +107,15 @@ func (s *StereoState) MidSideToLeftRight(mid, side []int16, predQ13 [2]int32, ra
 	}
 }
 
+// DropSide forgets the prediction and the side channel's history, keeping the mid's.
+//
+// A stream that gains a side channel has never coded one, so there is nothing for its prediction to
+// continue. The mid is a different matter: it has been playing all along.
+func (s *StereoState) DropSide() {
+	s.prevPredQ13 = [2]int32{}
+	s.side = [2]int16{}
+}
+
 // PrevPrediction returns the predictors last applied, which a frame with no coded prediction reuses.
 func (s *StereoState) PrevPrediction() [2]int32 { return s.prevPredQ13 }
 

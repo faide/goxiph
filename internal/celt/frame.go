@@ -261,6 +261,17 @@ func (d *Decoder) DecodeFrame(dec *rangecoder.Decoder, length int, frame FrameSi
 			alloc.Pulses[:], lm, d.start, d.end, d.rng)
 	}
 
+	// A silent frame carries no energies, so the history must not keep the ones the decoder read
+	// past. Leaving them would have the next frames predict from a signal that was not there, and
+	// the error takes several frames to decay out.
+	if silence {
+		for ch := range c {
+			for i := range NumBands {
+				d.logE[ch][i] = silenceEnergy
+			}
+		}
+	}
+
 	amp := make([]float32, NumBands)
 	for ch := range c {
 		LogToAmplitude(amp, d.logE[ch], d.start, d.end)

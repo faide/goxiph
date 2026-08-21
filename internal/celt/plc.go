@@ -70,25 +70,28 @@ func (d *Decoder) concealWithNoise(n, lm int) {
 			LogToAmplitude(amp, d.logE[c], d.start, d.end)
 		}
 
+		// Every band above the start is filled, whether or not the frame codes it. The bands past
+		// the end come out at zero anyway, because their amplitude is; what running the generator
+		// over them changes is where it leaves the seed, and the next concealed frame reads that.
 		spectrum[c] = make([]float32, n)
 		for b := d.start; b < NumBands; b++ {
 			lo, hi := BandEdges[b]<<uint(lm), BandEdges[b+1]<<uint(lm)
-			if b >= d.end {
-				break
-			}
 			for j := lo; j < hi; j++ {
 				d.rng = lcgRand(d.rng)
 				spectrum[c][j] = float32(int32(d.rng) >> 20)
 			}
 			renormalise(spectrum[c][lo:hi], 1)
 		}
-		DenormaliseBands(spectrum[c], spectrum[c], amp, d.end, lm)
+		clear(spectrum[c][BandEdges[d.end]<<uint(lm):])
+		DenormaliseBands(spectrum[c], spectrum[c], amp, NumBands, lm)
 	}
 
+	// The history is not rolled forward here, which is what the reference does: the frame goes over
+	// the end of the buffer and the samples before it stay where they were. The pitch-based branch
+	// rolls its own.
 	block := make([]float32, n+Overlap)
 	for c := range d.channels {
 		mem := d.decodeMem[c]
-		copy(mem[:decodeBufferSize-n], mem[n:decodeBufferSize])
 		d.mdct.InverseFrame(spectrum[c], block, lm, false, maxLM)
 
 		syn := decodeBufferSize - n

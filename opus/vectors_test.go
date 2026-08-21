@@ -190,11 +190,10 @@ func TestConformanceOfficialVectorAudio(t *testing.T) {
 		t.Logf("%-18s %6.1f dB against the %q output", name, best, bestName)
 	}
 
-	// A ratchet, not a target. Eight of the twelve vectors are between 30 and 83 dB, which is the
-	// reference's own signal; the rest are held back by the cross-fade a mode change asks for,
-	// which is built from a concealment frame and so waits on packet loss concealment. The bar
-	// records where the decoder stands and must never fall.
-	const floor = 12.0
+	// A ratchet, not a target. Three of the twelve match the reference sample for sample and the
+	// rest sit between 65 and 83 dB, which is single precision against double and nothing else. The
+	// bar records where the decoder stands and must never fall.
+	const floor = 60.0
 	if worstSNR < floor {
 		t.Errorf("worst vector reached %.1f dB, below the %.0f dB already held", worstSNR, floor)
 	}
